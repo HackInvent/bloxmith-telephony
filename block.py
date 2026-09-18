@@ -284,7 +284,8 @@ class _MediaSession:
     frame_sequence: int = 0
     frame_count: int = 0
     byte_count: int = 0
-    rtp_send_sequence: int = random.getrandbits(16) or 1
+    # Sequence 0 makes the first return packet carry the RTP marker bit.
+    rtp_send_sequence: int = 0
     rtp_timestamp: int = 0
     rtp_ssrc: int = random.getrandbits(32)
     command_started: bool = False
