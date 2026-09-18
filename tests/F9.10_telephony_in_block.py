@@ -109,6 +109,9 @@ def test_contract_config_ports_ui():
     card = block.render_node_card(node=node)["html"]
     assert 'data-block-config-field="ari_app"' in modal
     assert 'data-block-config-field="ari_password_ref"' in modal
+    assert 'data-block-title-field' in modal, "Modal title must use the generic editable binding."
+    assert 'data-block-apply' in modal, "Modal must expose the generic Apply action."
+    assert 'data-block-modal-apply' not in modal, "Legacy apply binding must not return."
     assert "Ports" in inspector and "bloxsmith" in card
     assert "raw password" not in modal
 

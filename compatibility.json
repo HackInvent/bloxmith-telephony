@@ -5,7 +5,7 @@
   "maintained_by": "HackInvent",
   "source": {
     "algorithm": "block-source-v1",
-    "sha256": "28aaeca0f985e47aa2f8c6917f87b0482ca45ae6484d8cd22b0b5a6fbd924fdb"
+    "sha256": "b065606748899f725aa0b82c47294998b52883ebd5b18a54545768b204eefcc6"
   },
   "bloxsmith_compatibility": [
     "1.0.9"
@@ -16,14 +16,14 @@
       "bloxsmith_version": "1.0.9",
       "framework_commit": "57e7ba724774c646df175ab870afd601d8aa4cd5",
       "framework_source_sha256": "48b1b447ea65fcc6e6b828b2a6b624febe02d878814142b18917e4a5fc40963e",
-      "tested_at": "2026-09-18T16:10:53.036489+00:00",
+      "tested_at": "2026-09-18T20:48:10.193106+00:00",
       "status": "passed",
       "installation_mode": "bundled",
       "suite_paths": [
         "tests/F9.10_telephony_in_block.py"
       ],
       "suite_count": 1,
-      "report_sha256": "ef53ec608e5bbbe1f043bdc472fd4b3e6c6e561ab1664861e243838fbf2720db"
+      "report_sha256": "595d04cc00e557fe17b1df5da075d669bf4aca7522bedb399a2fe658fe31e6a9"
     }
   ]
 }
