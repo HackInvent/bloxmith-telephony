@@ -1,0 +1,116 @@
+{
+  "kind": "telephony_in",
+  "title": "Telephony In",
+  "version": "0.1.0",
+  "bloxsmith_compatibility": [
+    "1.0.9"
+  ],
+  "tested_with_bloxsmith": "1.0.9",
+  "ports": {
+    "inputs": [],
+    "outputs": [
+      {
+        "id": 1,
+        "name": "event_out",
+        "title": "Call events",
+        "emits": [
+          "application/json"
+        ],
+        "multiplicity": "many",
+        "transport": "message"
+      },
+      {
+        "id": 2,
+        "name": "audio_out",
+        "title": "Call audio",
+        "emits": [
+          "audio/*"
+        ],
+        "multiplicity": "many",
+        "transport": "audio_stream",
+        "audio_stream": {
+          "codecs": [
+            "opus"
+          ],
+          "sample_rates_hz": [
+            48000
+          ],
+          "channels": [
+            1
+          ],
+          "overflow_policy": "drop_oldest"
+        }
+      }
+    ]
+  },
+  "config": {
+    "ari_base_url": "http://127.0.0.1:8088",
+    "ari_username": "bloxsmith",
+    "ari_password_ref": "",
+    "ari_app": "bloxsmith",
+    "expected_context": "",
+    "expected_extension": "",
+    "auto_answer": true,
+    "capture_audio": true,
+    "media_host": "127.0.0.1",
+    "media_port": 0,
+    "ffmpeg_chunk_ms": 100,
+    "max_calls": 1
+  },
+  "ui_assets": {
+    "modal": [
+      {
+        "kind": "css",
+        "path": "assets/css/block_ui.css"
+      }
+    ],
+    "inspector_panel": [
+      {
+        "kind": "css",
+        "path": "assets/css/block_ui.css"
+      }
+    ],
+    "node_card": [
+      {
+        "kind": "css",
+        "path": "assets/css/block_ui.css"
+      }
+    ]
+  },
+  "port_capabilities": {
+    "can_add_inputs": false,
+    "can_add_outputs": false,
+    "allow_required_input": false,
+    "default_required": false,
+    "max_inputs": 0,
+    "max_outputs": 2,
+    "default_input_accepts": [],
+    "default_output_emits": [
+      "application/json"
+    ],
+    "default_multiplicity": "many"
+  },
+  "node_card": {
+    "layout": {
+      "variant": "compact",
+      "width": 220,
+      "height": 82,
+      "min_width": 180,
+      "min_height": 72,
+      "max_width": 320,
+      "max_height": 120,
+      "classes": [
+        "telephony-in-node"
+      ]
+    }
+  },
+  "runtime": {
+    "initial_state": "waiting",
+    "runtime_executable": true,
+    "active_worker": true,
+    "generic_source": true,
+    "centralized_executor": "generic",
+    "supports_runtime_audio_streams": true,
+    "active_execution_policy": "source_on_play"
+  }
+}

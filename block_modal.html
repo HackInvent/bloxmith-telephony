@@ -1,0 +1,10 @@
+<div class="modal-panel block-config-modal telephony-in-ui" role="dialog" aria-modal="true" aria-labelledby="{{ node_id }}TelephonyTitle" data-generic-block-modal-root data-node-id="{{ node_id }}" data-node-kind="{{ node_kind }}">
+  <div class="modal-header"><div><span class="panel-kicker">OVH/Asterisk</span><h2 id="{{ node_id }}TelephonyTitle">{{ node_title }}</h2></div><button class="ghost-btn" data-close-block-modal type="button">Close</button></div>
+  <div class="block-config-modal-body">
+    <div class="field-group"><label>Block title<input data-block-title type="text" autocomplete="off" value="{{ node_title }}" /></label></div>
+    {{ config_fields_html }}
+    <details><summary>Ports</summary><div>{{ ports_html }}</div></details>
+    <details><summary>Runtime state</summary><div>{{ runtime_html }}</div></details>
+  </div>
+  <div class="block-config-actions"><button class="solid-btn" data-block-modal-apply type="button">Apply</button></div>
+</div>
