@@ -43,7 +43,18 @@ Message output with `application/json`. Events use a provider-neutral shape:
 }
 ```
 
-`event` is `call.incoming`, `call.ended`, or `call.failed` (with `reason=media_setup` when Asterisk media attachment fails).
+`event` is `call.incoming`, `call.ended`, or `call.failed` (with `reason=media_setup` when Asterisk media attachment fails). With capture enabled, `call.ended` also reports diagnostic RTP counters: `rtp_packets`, `rtp_bytes`, and `rtp_return_packets`.
+
+```json
+{
+  "provider": "asterisk",
+  "event": "call.ended",
+  "call_id": "ari-channel-id",
+  "rtp_packets": 500,
+  "rtp_bytes": 320000,
+  "rtp_return_packets": 500
+}
+```
 
 ### `audio_out` (ID 2)
 
@@ -95,7 +106,7 @@ The stop command is emitted only after RTP intake has stopped and encoded frames
 
 ### Active Runtime (`zeromq_active`)
 
-After Run, the persistent listener connects to Asterisk ARI. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, receives RTP, returns RTP silence to keep Asterisk's media timer alive, transcodes received linear PCM to Opus/Ogg, and publishes frames through `audio_out`. `StasisEnd` releases media and emits `call.ended`. A media setup failure releases the local transport and emits `call.failed` before a redacted runtime error.
+After Run, the persistent listener connects to Asterisk ARI. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, receives RTP, returns standards-compliant 20 ms RTP silence (including the first-packet marker), transcodes Asterisk's big-endian `slin16` PCM to Opus/Ogg, and publishes frames through `audio_out`. `StasisEnd` releases media and emits `call.ended`. A media setup failure releases the local transport and emits `call.failed` before a redacted runtime error.
 
 ### One Shot Simulation (`centralized`)
 

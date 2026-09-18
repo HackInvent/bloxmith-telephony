@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import time
 import shutil
+import struct
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -19,7 +21,7 @@ for item in reversed(sys_path):
         __import__("sys").path.insert(0, item)
 import sys
 
-from blocs.telephony_in.block import DEFAULTS, TelephonyInBlock, config, _event
+from blocs.telephony_in.block import DEFAULTS, TelephonyInBlock, config, _event, _rtp_payload
 from blocs.display.block import DisplayBlock
 from bloxsmith_app.block_api import BlockRuntimeContext
 from bloxsmith_app.block_runtime import BlockRuntimePreparationContext
@@ -217,16 +219,19 @@ def test_media_setup_failure_releases_transport():
 
 
 def test_real_opus_encoder():
-    """FB2: RTP's linear-PCM payload becomes a decodable Ogg/Opus runtime frame."""
+    """FB2: RTP's big-endian linear PCM becomes decodable Ogg/Opus audio."""
     if shutil.which("ffmpeg") is None:
         raise AssertionError("FFmpeg is required by the telephony audio contract.")
     from blocs.telephony_in.block import _AudioEncoder
 
+    expected = [int(10000 * math.sin(2 * math.pi * 440 * index / 16000)) for index in range(3200)]
+    pcm = b"".join(sample.to_bytes(2, "big", signed=True) for sample in expected)
+
     async def scenario():
         encoder = await _AudioEncoder.create(20)
         chunks = []
-        for _ in range(5):
-            chunks.extend(await encoder.feed(bytes(320)))
+        for offset in range(0, len(pcm), 640):
+            chunks.extend(await encoder.feed(pcm[offset:offset + 640]))
         chunks.extend(await encoder.close())
         return b"".join(chunks)
 
@@ -234,9 +239,13 @@ def test_real_opus_encoder():
     assert encoded.startswith(b"OggS"), "Encoder must emit an Ogg container"
     decoded = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "ogg", "-i", "pipe:0",
-         "-f", "s16le", "pipe:1"], input=encoded, capture_output=True, timeout=10, check=True,
+         "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"],
+        input=encoded, capture_output=True, timeout=10, check=True,
     ).stdout
-    assert decoded, "Encoded call audio must be decodable"
+    actual = struct.unpack("<%dh" % (len(decoded) // 2), decoded)
+    assert len(actual) >= len(expected), "Encoded call audio must cover the source duration"
+    assert max(abs(left - right) for left, right in zip(expected, actual)) < 1000, \
+        "Asterisk slin16 RTP payload must be decoded as big-endian PCM"
 
 
 def test_active_graph_with_fake_ari():
@@ -338,6 +347,16 @@ class FakeEncoder:
         return []
 
 
+def test_rtp_payload_skips_extension_header():
+    """FB5: RTP extension headers must not be interpreted as call audio."""
+    packet = (
+        bytes([0x90, 118, 0, 3, 0, 0, 0, 1, 0, 0, 0, 2]) +
+        bytes([0xbe, 0xde, 0, 1, 0, 0, 0, 0]) +
+        b"audio-payload"
+    )
+    assert _rtp_payload(packet) == b"audio-payload"
+
+
 def test_correlated_audio_commands():
     """FB2/FB8: media start/stop emits exact, correlated STT command counters."""
     from blocs.telephony_in.block import _MediaSession
@@ -383,6 +402,12 @@ def test_correlated_audio_commands():
             assert stop["frame_count"] == len(audio.publications) >= 1
             assert stop["byte_count"] == sum(len(item[1]) for item in audio.publications)
             assert stop["aborted"] is False
+            events = [json.loads(result.outputs[0].value) for result in emitted
+                      if result.outputs and result.outputs[0].port_id == 1]
+            ended = events[-1]
+            assert ended["rtp_packets"] == 1
+            assert ended["rtp_bytes"] == len(b"pcm-sample")
+            assert ended["rtp_return_packets"] >= 1
             for command in commands:
                 assert command.outputs[0].port_name == "command_out"
                 assert command.outputs[0].content_type == "application/json"
@@ -411,15 +436,31 @@ def test_audio_media_attach_publish_and_release():
             await block._start_media(client, settings, session, audio)
             assert session.transport is not None
             port = session.transport.get_extra_info("socket").getsockname()[1]
-            packet = bytes([0x80, 0x00, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]) + b"pcm-sample"
-            with __import__("socket").socket(__import__("socket").AF_INET, __import__("socket").SOCK_DGRAM) as sender:
+            packet = bytes([0x80, 118, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]) + bytes(640)
+            socket = __import__("socket")
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
                 sender.settimeout(2)
                 sender.sendto(packet, ("127.0.0.1", port))
-                returned, _ = await asyncio.get_running_loop().run_in_executor(None, sender.recvfrom, 65536)
-                assert len(returned) == len(packet), "Return RTP must preserve the negotiated payload size"
-                assert returned[0] & 0xc0 == 0x80 and returned[1] == 0, "Invalid return RTP silence header"
+                loop = asyncio.get_running_loop()
+                first, _ = await loop.run_in_executor(None, sender.recvfrom, 65536)
+                assert first[0] & 0xc0 == 0x80, "Return RTP must use version 2"
+                assert first[1] == 0x80 | 118, "The first return RTP packet must set the marker bit"
+                assert int.from_bytes(first[2:4], "big") == 0
+                assert int.from_bytes(first[4:8], "big") == 0
+                assert len(first) == len(packet), "Return RTP must preserve the negotiated payload size"
+
+                sender.sendto(bytes([0x80, 118, 0, 2, 0, 0, 1, 64, 0, 0, 0, 1]) + bytes(640), ("127.0.0.1", port))
+                second, _ = await loop.run_in_executor(None, sender.recvfrom, 65536)
+                assert second[1] == 118, "Only the first return RTP packet may set the marker"
+                assert int.from_bytes(second[2:4], "big") == 1
+                assert int.from_bytes(second[4:8], "big") == 320, "slin16 timestamps advance by one sample per byte pair"
+
+                keepalive, _ = await loop.run_in_executor(None, sender.recvfrom, 65536)
+                assert keepalive[1] == 118 and int.from_bytes(keepalive[2:4], "big") == 2, \
+                    "RTP silence must continue when Asterisk intake pauses"
+            assert session.rtp_packet_count == 2
             end = time.monotonic() + 2
-            while not audio.publications and time.monotonic() < end:
+            while len(audio.publications) < 2 and time.monotonic() < end:
                 await asyncio.sleep(0.01)
             assert audio.publications, "RTP payload was not published as audio"
             await session.close()
@@ -447,6 +488,7 @@ def main():
     test_event_normalization_and_listener_emission()
     test_correlated_audio_commands()
     test_audio_media_attach_publish_and_release()
+    test_rtp_payload_skips_extension_header()
     test_media_setup_failure_releases_transport()
     test_real_opus_encoder()
     test_active_graph_with_fake_ari()

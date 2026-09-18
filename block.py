@@ -27,6 +27,7 @@ import json
 import random
 import re
 import shutil
+import time
 from typing import Any
 
 from bloxsmith_app.block_api import (
@@ -209,7 +210,7 @@ class _AudioEncoder:
         """Start an FFmpeg subprocess configured for mono 48 kHz Opus output."""
 
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16le",
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16be",
             "-ar", "16000", "-ac", "1", "-i", "pipe:0", "-c:a", "libopus",
             "-b:a", "32000", "-page_duration", str(chunk_ms * 1000), "-f", "ogg", "pipe:1",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -284,10 +285,17 @@ class _MediaSession:
     frame_sequence: int = 0
     frame_count: int = 0
     byte_count: int = 0
-    # Sequence 0 makes the first return packet carry the RTP marker bit.
     rtp_send_sequence: int = 0
     rtp_timestamp: int = 0
     rtp_ssrc: int = random.getrandbits(32)
+    rtp_marker_sent: bool = False
+    rtp_remote_addr: tuple | None = None
+    rtp_payload_type: int | None = None
+    rtp_payload_size: int | None = None
+    rtp_last_send: float = 0.0
+    rtp_packet_count: int = 0
+    rtp_received_byte_count: int = 0
+    rtp_sent_packet_count: int = 0
     command_started: bool = False
     aborted: bool = False
     stopping: bool = False
@@ -329,11 +337,17 @@ def _rtp_payload(packet: bytes) -> bytes | None:
         return None
     version = packet[0] >> 6
     padding = bool(packet[0] & 0x20)
+    extension = bool(packet[0] & 0x10)
     contributing = packet[0] & 0x0F
     payload_type = packet[1] & 0x7F
     if version != 2 or payload_type in {13, 72, 73, 74, 75, 76}:
         return None
     start = 12 + contributing * 4
+    if extension:
+        if len(packet) < start + 4:
+            return None
+        extension_words = int.from_bytes(packet[start + 2:start + 4], "big")
+        start += 4 + extension_words * 4
     if len(packet) <= start:
         return None
     payload = packet[start:]
@@ -535,7 +549,12 @@ class TelephonyInBlock(BlockDefinition):
                     "frame_count": session.frame_count, "byte_count": session.byte_count,
                     "aborted": session.aborted,
                 }))
-            context.emit_result(self._call_result(_event("call.ended", channel, call_id=session.call_id)))
+            context.emit_result(self._call_result(_event(
+                "call.ended", channel, call_id=session.call_id,
+                rtp_packets=session.rtp_packet_count,
+                rtp_bytes=session.rtp_received_byte_count,
+                rtp_return_packets=session.rtp_sent_packet_count,
+            )))
 
     @staticmethod
     def _matches(channel: Mapping[str, Any], config_value: Mapping[str, Any]) -> bool:
@@ -580,10 +599,10 @@ class TelephonyInBlock(BlockDefinition):
     def _rtp_silence_packet(session: "_MediaSession", payload_type: int, size: int) -> bytes:
         """Build one return RTP silence packet using the external-media payload type."""
 
-        marker = 0x80 if session.rtp_send_sequence == 0 else 0x00
+        marker = 0x00 if session.rtp_marker_sent else 0x80
         header = bytes((
-            0x80 | marker,
-            payload_type & 0x7f,
+            0x80,
+            marker | (payload_type & 0x7f),
             (session.rtp_send_sequence >> 8) & 0xff,
             session.rtp_send_sequence & 0xff,
             (session.rtp_timestamp >> 24) & 0xff,
@@ -595,9 +614,20 @@ class TelephonyInBlock(BlockDefinition):
             (session.rtp_ssrc >> 8) & 0xff,
             session.rtp_ssrc & 0xff,
         ))
+        session.rtp_marker_sent = True
         session.rtp_send_sequence = (session.rtp_send_sequence + 1) & 0xffff
         session.rtp_timestamp += max(1, size // 2)
         return header + bytes(size)
+
+    @staticmethod
+    def _send_rtp_silence(session: "_MediaSession", remote_addr: tuple, payload_type: int, size: int) -> None:
+        """Send one valid silence packet and record the send cadence."""
+
+        if session.transport is None or size <= 0:
+            return
+        session.transport.sendto(TelephonyInBlock._rtp_silence_packet(session, payload_type, size), remote_addr)
+        session.rtp_sent_packet_count += 1
+        session.rtp_last_send = time.monotonic()
 
     @staticmethod
     async def _pump_media(session: "_MediaSession", encoder: "_AudioEncoder",
@@ -606,16 +636,24 @@ class TelephonyInBlock(BlockDefinition):
 
         while not session.stopping:
             try:
-                remote_addr, payload_type, payload = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                await asyncio.sleep(0.002)
+                remote_addr, payload_type, payload = await asyncio.wait_for(queue.get(), timeout=0.02)
+            except asyncio.TimeoutError:
+                if (session.rtp_remote_addr is not None and session.rtp_payload_type is not None and
+                        session.rtp_payload_size is not None and
+                        time.monotonic() - session.rtp_last_send >= 0.02):
+                    TelephonyInBlock._send_rtp_silence(
+                        session, session.rtp_remote_addr, session.rtp_payload_type, session.rtp_payload_size
+                    )
                 continue
-            # Asterisk stops external media after about 10 seconds without return RTP.
-            # Silence keeps the channel alive while this block remains a capture-only source.
-            if remote_addr and session.transport is not None:
-                session.transport.sendto(
-                    TelephonyInBlock._rtp_silence_packet(session, payload_type, len(payload)), remote_addr
-                )
+            session.rtp_packet_count += 1
+            session.rtp_received_byte_count += len(payload)
+            session.rtp_remote_addr = remote_addr
+            session.rtp_payload_type = payload_type
+            session.rtp_payload_size = len(payload)
+            # Asterisk can stop external media after a short interval without return RTP.
+            # Answer every inbound packet and keep sending 20 ms silence if intake pauses.
+            if remote_addr:
+                TelephonyInBlock._send_rtp_silence(session, remote_addr, payload_type, len(payload))
             chunks = await encoder.feed(payload)
             if audio is not None:
                 for chunk in chunks:
