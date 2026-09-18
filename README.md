@@ -84,6 +84,21 @@ After Run, the persistent listener connects to Asterisk ARI. Matching calls emit
 
 Runtime audio and live ARI listeners are unavailable. The block validates its contract and reports a skipped source result without fabricating calls.
 
+## OVH SIP credentials
+
+OVH credentials are **not block settings**. They belong to the Asterisk PJSIP registration.
+
+In a `phone_test`-style Asterisk setup, keep them in its protected `.env` file:
+
+```env
+OVH_SIP_USERNAME=your-ovh-number
+OVH_SIP_PASSWORD=your-ovh-sip-password
+OVH_SIP_DOMAIN=your-ovh-sip-domain
+OVH_SIP_PROXY=your-ovh-sip-proxy
+```
+
+Then render and apply the Asterisk configuration using the tooling that owns that setup. Do not copy these values into the BloxSmith blueprint or a plain block config. The block only needs local ARI access and the secret reference for the ARI password.
+
 ## Asterisk requirement
 
 Asterisk must already register the OVH line and route matching inbound calls to the configured Stasis application, for example:
