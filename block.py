@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape
 import json
+import random
 import re
 import shutil
 from typing import Any
@@ -283,6 +284,9 @@ class _MediaSession:
     frame_sequence: int = 0
     frame_count: int = 0
     byte_count: int = 0
+    rtp_send_sequence: int = random.getrandbits(16) or 1
+    rtp_timestamp: int = 0
+    rtp_ssrc: int = random.getrandbits(32)
     command_started: bool = False
     aborted: bool = False
     stopping: bool = False
@@ -552,8 +556,9 @@ class TelephonyInBlock(BlockDefinition):
         class _Protocol(asyncio.DatagramProtocol):
             def datagram_received(self, data: bytes, addr: tuple) -> None:
                 payload = _rtp_payload(data)
+                payload_type = data[1] & 0x7f
                 if payload is not None:
-                    try: queue.put_nowait((data, payload))
+                    try: queue.put_nowait((addr, payload_type, payload))
                     except asyncio.QueueFull: pass
 
         transport, _ = await loop.create_datagram_endpoint(_Protocol, local_addr=(config_value["media_host"], int(config_value["media_port"])))
@@ -571,16 +576,45 @@ class TelephonyInBlock(BlockDefinition):
         session.pump_task = asyncio.create_task(self._pump_media(session, encoder, queue, audio))
 
     @staticmethod
+    def _rtp_silence_packet(session: "_MediaSession", payload_type: int, size: int) -> bytes:
+        """Build one return RTP silence packet using the external-media payload type."""
+
+        marker = 0x80 if session.rtp_send_sequence == 0 else 0x00
+        header = bytes((
+            0x80 | marker,
+            payload_type & 0x7f,
+            (session.rtp_send_sequence >> 8) & 0xff,
+            session.rtp_send_sequence & 0xff,
+            (session.rtp_timestamp >> 24) & 0xff,
+            (session.rtp_timestamp >> 16) & 0xff,
+            (session.rtp_timestamp >> 8) & 0xff,
+            session.rtp_timestamp & 0xff,
+            (session.rtp_ssrc >> 24) & 0xff,
+            (session.rtp_ssrc >> 16) & 0xff,
+            (session.rtp_ssrc >> 8) & 0xff,
+            session.rtp_ssrc & 0xff,
+        ))
+        session.rtp_send_sequence = (session.rtp_send_sequence + 1) & 0xffff
+        session.rtp_timestamp += max(1, size // 2)
+        return header + bytes(size)
+
+    @staticmethod
     async def _pump_media(session: "_MediaSession", encoder: "_AudioEncoder",
-                          queue: "asyncio.Queue[tuple[bytes, bytes]]", audio: Any) -> None:
-        """Convert queued RTP payloads and publish encoded frames until media stops."""
+                          queue: "asyncio.Queue[tuple[tuple, int, bytes]]", audio: Any) -> None:
+        """Convert RTP input, return silence to Asterisk, and publish encoded frames."""
 
         while not session.stopping:
             try:
-                packet, payload = queue.get_nowait()
+                remote_addr, payload_type, payload = queue.get_nowait()
             except asyncio.QueueEmpty:
                 await asyncio.sleep(0.002)
                 continue
+            # Asterisk stops external media after about 10 seconds without return RTP.
+            # Silence keeps the channel alive while this block remains a capture-only source.
+            if remote_addr and session.transport is not None:
+                session.transport.sendto(
+                    TelephonyInBlock._rtp_silence_packet(session, payload_type, len(payload)), remote_addr
+                )
             chunks = await encoder.feed(payload)
             if audio is not None:
                 for chunk in chunks:

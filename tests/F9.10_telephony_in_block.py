@@ -413,7 +413,11 @@ def test_audio_media_attach_publish_and_release():
             port = session.transport.get_extra_info("socket").getsockname()[1]
             packet = bytes([0x80, 0x00, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]) + b"pcm-sample"
             with __import__("socket").socket(__import__("socket").AF_INET, __import__("socket").SOCK_DGRAM) as sender:
+                sender.settimeout(2)
                 sender.sendto(packet, ("127.0.0.1", port))
+                returned, _ = await asyncio.get_running_loop().run_in_executor(None, sender.recvfrom, 65536)
+                assert len(returned) == len(packet), "Return RTP must preserve the negotiated payload size"
+                assert returned[0] & 0xc0 == 0x80 and returned[1] == 0, "Invalid return RTP silence header"
             end = time.monotonic() + 2
             while not audio.publications and time.monotonic() < end:
                 await asyncio.sleep(0.01)

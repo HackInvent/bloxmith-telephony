@@ -95,7 +95,7 @@ The stop command is emitted only after RTP intake has stopped and encoded frames
 
 ### Active Runtime (`zeromq_active`)
 
-After Run, the persistent listener connects to Asterisk ARI. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, receives RTP, transcodes linear PCM to Opus/Ogg, and publishes frames through `audio_out`. `StasisEnd` releases media and emits `call.ended`. A media setup failure releases the local transport and emits `call.failed` before a redacted runtime error.
+After Run, the persistent listener connects to Asterisk ARI. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, receives RTP, returns RTP silence to keep Asterisk's media timer alive, transcodes received linear PCM to Opus/Ogg, and publishes frames through `audio_out`. `StasisEnd` releases media and emits `call.ended`. A media setup failure releases the local transport and emits `call.failed` before a redacted runtime error.
 
 ### One Shot Simulation (`centralized`)
 
