@@ -112,6 +112,14 @@ def test_contract_config_ports_ui():
     assert 'data-block-title-field' in modal, "Modal title must use the generic editable binding."
     assert 'data-block-apply' in modal, "Modal must expose the generic Apply action."
     assert 'data-block-modal-apply' not in modal, "Legacy apply binding must not return."
+    assert '<label>ARI secret<input' in modal, "Secret reference must use the clear ARI secret label."
+    assert 'placeholder="secret://workspace/asterisk_secret"' in modal
+    assert 'type="password"' not in modal, "The vault reference is not itself a secret and stays visible."
+    assert 'data-block-skip-empty' not in modal, "Users must be able to clear the secret reference."
+    secret_ref = 'secret://workspace/telephony-demo'
+    node["config"]["ari_password_ref"] = secret_ref
+    modal = block.render_modal(node=node)["html"]
+    assert f'value="{secret_ref}"' in modal, "Existing vault reference must render in clear text."
     assert "Ports" in inspector and "bloxsmith" in card
     assert "raw password" not in modal
 

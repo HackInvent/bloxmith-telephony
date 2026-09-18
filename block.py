@@ -22,6 +22,7 @@ import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import escape
 import json
 import re
 import shutil
@@ -61,6 +62,10 @@ _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 class TelephonyInError(RuntimeError):
     """Stable block-owned validation or transport failure."""
+
+
+class BlockRenderError(RuntimeError):
+    """Stable failure for invalid block-owned UI rendering."""
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -338,6 +343,39 @@ class TelephonyInBlock(BlockDefinition):
         template = (self.directory / "inspector_panel.html").read_text(encoding="utf-8")
         return {"html": render_inspector_template(template=template, node=node, payload=payload),
                 "context": {"node_id": str(node.get("id") or ""), "node_kind": self.kind}}
+
+    def render_modal(self, *, node: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Render generic settings with a clear, user-labelled ARI secret field.
+
+        The configured value is a vault reference, not the ARI password. Keeping
+        it visible makes mistakes easy to detect while the real secret remains
+        stored in the BloxSmith vault.
+        """
+
+        rendered = super().render_modal(node=node, payload=payload)
+        html = rendered.get("html", "")
+        config_value = config(node.get("config"))
+        field = (
+            '<div class="field-group"><label>ARI secret'
+            '<input data-block-config-field="ari_password_ref" type="text" '
+            f'value="{escape(config_value["ari_password_ref"], quote=True)}" '
+            'autocomplete="off" spellcheck="false" '
+            'placeholder="secret://workspace/asterisk_secret" /></label></div>'
+        )
+        html, replaced = re.subn(
+            r'<div class="field-group"><label>Ari password ref</label>'
+            r'<input data-block-config-field="ari_password_ref"'
+            r' data-block-skip-empty="true" type="password"'
+            r' autocomplete="off" spellcheck="false"'
+            r' placeholder="[^"]*" /></div>',
+            field,
+            html,
+            count=1,
+        )
+        if replaced != 1:
+            raise BlockRenderError("Le champ ARI secret n'a pas pu etre rendu.")
+        rendered["html"] = html
+        return rendered
 
     def prepare_runtime(self, context: BlockRuntimePreparationContext) -> BlockRuntimePreparation:
         """Validate early and request the persistent listener in Active Runtime."""

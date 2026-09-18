@@ -61,7 +61,7 @@ Connect it to a compatible audio consumer such as `Save Audio` or a supported tr
 | --- | --- | --- |
 | `ari_base_url` | `http://127.0.0.1:8088` | Local HTTP ARI endpoint; converted internally to a WebSocket events URL. |
 | `ari_username` | `bloxsmith` | ARI user. |
-| `ari_password_ref` | empty | Secret vault reference containing the ARI password. Required for Active Runtime; it is never stored as a raw password. |
+| `ari_password_ref` | empty | Secret vault reference containing the ARI password. Required for Active Runtime; shown in the modal as **ARI secret**, in clear text, with a `secret://workspace/asterisk_secret` placeholder. |
 | `ari_app` | `bloxsmith` | Asterisk Stasis application name. |
 | `expected_context` | empty | Optional inbound context filter. Empty accepts all contexts routed to the app. |
 | `expected_extension` | empty | Optional inbound extension filter. Empty accepts all extensions. |
