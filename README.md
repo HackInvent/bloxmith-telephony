@@ -1,7 +1,7 @@
 # Telephony In
 
 <!-- block-metadata:start -->
-[![Block version: 0.1.0](https://img.shields.io/badge/block-0.1.0-blue)](model.json)
+[![Block version: 0.2.0](https://img.shields.io/badge/block-0.2.0-blue)](model.json)
 [![BloxSmith compatibility: 1.0.9](https://img.shields.io/badge/BloxSmith-1.0.9-brightgreen)](compatibility.json)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -16,6 +16,7 @@ Receive inbound telephone calls from an OVHcloud SIP line through an existing lo
 
 - `event_out`: JSON call lifecycle events.
 - `audio_out`: Opus/Ogg runtime audio, when capture is enabled.
+- `command_out`: correlated JSON `start`/`stop` commands for audio consumers.
 
 The block does not register the OVH SIP trunk itself. Reuse the Asterisk/PJSIP registration from your existing OVH configuration and route the selected inbound context to `Stasis(<ari_app>)`.
 
@@ -74,6 +75,22 @@ Connect it to a compatible audio consumer such as `Save Audio` or a supported tr
 
 Changing the app name, capture mode, audio route, or listener declaration requires Stop, then Load/Run again in Active Runtime.
 
+## Command output
+
+`command_out` (ID 3) emits JSON lifecycle commands with the same `stream_id` as the audio frames. Connect it separately to `OpenAI Realtime STT.command_in`, `Save Audio.command_in`, or another compatible consumer.
+
+Normal capture commands are:
+
+```json
+{"action":"start","stream_id":"ari-channel-id"}
+```
+
+```json
+{"action":"stop","stream_id":"ari-channel-id","frame_count":132,"byte_count":184217,"aborted":false}
+```
+
+The stop command is emitted only after RTP intake has stopped and encoded frames have drained. `frame_count` and `byte_count` are exact published totals. `aborted` is `true` if Active Runtime stops while a call is still active. Existing `0.1.0` nodes must be recreated to obtain the fixed three-port contract.
+
 ## Runtime behavior
 
 ### Active Runtime (`zeromq_active`)
@@ -117,15 +134,18 @@ The block needs ARI access and, for audio, permission to create bridges and exte
 2. Put the ARI password in the secret vault and reference it with `ari_password_ref`.
 3. Route the OVH inbound context to `Stasis(bloxsmith)`.
 4. Start Active Runtime.
-5. Connect `event_out` to `Display` and `audio_out` to `Save Audio`.
-6. Call the OVH number; the blueprint receives the call event and audio stream.
+5. Connect all three ports separately:
+   - `event_out → Display` (optional);
+   - `audio_out → Save Audio.audio_in` or `OpenAI Realtime STT.audio_in`;
+   - `command_out → Save Audio.command_in` or `OpenAI Realtime STT.command_in`.
+6. Call the OVH number; the blueprint receives the call event, audio stream and correlated start/stop commands.
 
 ## Limits and warnings
 
 - Live calls require Active Runtime and a reachable Asterisk service.
 - The block captures only calls Asterisk routes into its Stasis application.
 - The current release does not dial outbound calls, play prompts, collect DTMF, record files itself, or transcribe audio.
-- RTP delivery is transient; there is no persisted event journal or replay in version 0.1.0.
+- RTP delivery is transient; there is no persisted event journal or replay in version 0.2.0.
 - Asterisk, RTP and FFmpeg failures stop the affected capture and surface a redacted runtime error.
 - Never expose the ARI HTTP/WebSocket port, SIP port, or RTP range directly to untrusted networks.
 - Recording telephone calls can require caller consent and may be regulated; configure and retain audio only where lawful.

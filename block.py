@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Functional behavior:
 # FB1 - Normalize inbound Asterisk/OVH StasisStart and StasisEnd events.
-# FB2 - Publish call audio through the framework Runtime Audio Streams output.
+# FB2 - Publish call audio plus correlated start/stop commands for audio consumers.
 # FB3 - Validate bounded settings and fixed ports before network/media effects.
 # FB4 - Resolve the ARI password only as a vault reference in Active Runtime.
 # FB5 - Attach and release Asterisk external media, bridges and RTP transports.
@@ -280,6 +280,26 @@ class _MediaSession:
     transport: asyncio.DatagramTransport | None = None
     encoder: _AudioEncoder | None = None
     rtp_sequence: int = 0
+    frame_sequence: int = 0
+    frame_count: int = 0
+    byte_count: int = 0
+    command_started: bool = False
+    aborted: bool = False
+    stopping: bool = False
+
+    async def finish_media(self) -> None:
+        """Stop RTP intake, drain encoded frames, and leave exact stop counters."""
+
+        self.stopping = True
+        if self.transport is not None:
+            self.transport.close()
+            self.transport = None
+        if self.pump_task is not None:
+            try:
+                await self.pump_task
+            except asyncio.CancelledError:
+                self.aborted = True
+            self.pump_task = None
 
     async def close(self) -> None:
         if self.pump_task is not None:
@@ -446,6 +466,14 @@ class TelephonyInBlock(BlockDefinition):
                     await self._handle_event(context, client, config_value, sessions, event, audio)
         finally:
             for session in list(sessions.values()):
+                if session.command_started:
+                    session.aborted = True
+                    await session.finish_media()
+                    context.emit_result(self._command_result({
+                        "action": "stop", "stream_id": session.call_id,
+                        "frame_count": session.frame_count, "byte_count": session.byte_count,
+                        "aborted": True,
+                    }))
                 await session.close()
                 if session.bridge_id:
                     await client.request("DELETE", f"/bridges/{session.bridge_id}", quiet=True)
@@ -473,6 +501,10 @@ class TelephonyInBlock(BlockDefinition):
             if config_value["capture_audio"]:
                 try:
                     await self._start_media(client, config_value, session, audio)
+                    session.command_started = True
+                    context.emit_result(self._command_result({
+                        "action": "start", "stream_id": session.call_id,
+                    }))
                 except Exception:
                     await session.close()
                     if session.bridge_id:
@@ -487,11 +519,17 @@ class TelephonyInBlock(BlockDefinition):
             return
         if event_type == "StasisEnd" and channel_id in sessions:
             session = sessions.pop(channel_id)
-            await session.close()
+            await session.finish_media()
             if session.bridge_id:
                 await client.request("DELETE", f"/bridges/{session.bridge_id}", quiet=True)
             if session.external_channel_id:
                 await client.request("DELETE", f"/channels/{session.external_channel_id}", quiet=True)
+            if session.command_started:
+                context.emit_result(self._command_result({
+                    "action": "stop", "stream_id": session.call_id,
+                    "frame_count": session.frame_count, "byte_count": session.byte_count,
+                    "aborted": session.aborted,
+                }))
             context.emit_result(self._call_result(_event("call.ended", channel, call_id=session.call_id)))
 
     @staticmethod
@@ -535,20 +573,35 @@ class TelephonyInBlock(BlockDefinition):
     @staticmethod
     async def _pump_media(session: "_MediaSession", encoder: "_AudioEncoder",
                           queue: "asyncio.Queue[tuple[bytes, bytes]]", audio: Any) -> None:
-        """Convert queued RTP payloads and publish encoded frames until cancelled."""
+        """Convert queued RTP payloads and publish encoded frames until media stops."""
 
-        while True:
+        while not session.stopping:
             try:
                 packet, payload = queue.get_nowait()
             except asyncio.QueueEmpty:
                 await asyncio.sleep(0.002)
                 continue
-            session.rtp_sequence += 1
             chunks = await encoder.feed(payload)
             if audio is not None:
                 for chunk in chunks:
+                    session.frame_sequence += 1
+                    session.frame_count += 1
+                    session.byte_count += len(chunk)
                     audio.publish_port("audio_out", chunk, codec="opus", sample_rate_hz=48000, channels=1,
-                                       stream_id=session.call_id, sequence=session.rtp_sequence)
+                                       stream_id=session.call_id, sequence=session.frame_sequence)
+        final_chunks: list[bytes] = []
+        try:
+            final_chunks = await encoder.close()
+        except Exception:
+            session.aborted = True
+        if audio is not None:
+            for chunk in final_chunks:
+                session.frame_sequence += 1
+                session.frame_count += 1
+                session.byte_count += len(chunk)
+                audio.publish_port("audio_out", chunk, codec="opus", sample_rate_hz=48000, channels=1,
+                                   stream_id=session.call_id, sequence=session.frame_sequence)
+        session.encoder = None
 
     def listen_runtime(self, context: BlockRuntimeListenerContext) -> None:
         """Run the Asterisk listener on the framework-owned supervised thread."""
@@ -563,12 +616,23 @@ class TelephonyInBlock(BlockDefinition):
         """Protect the fixed event/audio port identities and transports."""
 
         inputs, outputs = tuple(context.input_ports), tuple(context.output_ports)
-        if inputs or len(outputs) != 2:
-            raise TelephonyInError("Telephony In requires no inputs and its two fixed outputs.")
-        expected = {(1, "event_out", "message"), (2, "audio_out", "audio_stream")}
+        if inputs or len(outputs) != 3:
+            raise TelephonyInError("Telephony In requires no inputs and its three fixed outputs.")
+        expected = {
+            (1, "event_out", "message"), (2, "audio_out", "audio_stream"),
+            (3, "command_out", "message"),
+        }
         actual = {(p.id, p.name, getattr(p, "transport", "message")) for p in outputs}
         if actual != expected:
-            raise TelephonyInError("event_out and audio_out ports must remain unchanged; recreate an altered node.")
+            raise TelephonyInError("event_out, audio_out and command_out ports must remain unchanged; recreate an altered node.")
+
+    @staticmethod
+    def _command_result(command: Mapping[str, Any]) -> BlockRuntimeResult:
+        """Build one listener result containing one correlated capture command."""
+
+        return BlockRuntimeResult(outputs=[BlockRuntimeOutput(port_id=3, port_name="command_out",
+            value=json.dumps(command, ensure_ascii=False, separators=(",", ":")), content_type=APPLICATION_JSON)],
+            content_type=APPLICATION_JSON, metadata={"telephony_in": {"command": command.get("action")}})
 
     @staticmethod
     def _call_result(payload: Mapping[str, Any]) -> BlockRuntimeResult:

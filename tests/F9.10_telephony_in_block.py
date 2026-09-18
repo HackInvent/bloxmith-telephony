@@ -87,6 +87,9 @@ def test_contract_config_ports_ui():
             raise AssertionError(f"Invalid setting accepted: {values}")
 
     block = TelephonyInBlock()
+    assert block.model["version"] == "0.2.0"
+    command_port = next(port for port in block.model["ports"]["outputs"] if port["name"] == "command_out")
+    assert command_port["id"] == 3 and command_port["transport"] == "message"
     assert block.prepare_runtime(preparation_context("centralized")).listen_on_run is False
     assert block.prepare_runtime(preparation_context("zeromq_active")).listen_on_run is True
     bad = preparation_context("centralized", {"ari_app": ""})
@@ -335,6 +338,61 @@ class FakeEncoder:
         return []
 
 
+def test_correlated_audio_commands():
+    """FB2/FB8: media start/stop emits exact, correlated STT command counters."""
+    from blocs.telephony_in.block import _MediaSession
+
+    async def scenario():
+        block = TelephonyInBlock()
+        client = AsyncRequestRecorder()
+        client.responses = [{"id": "external-1"}, {"id": "bridge-1"}]
+        audio = FakeAudioClient()
+        settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": True, "auto_answer": False})
+        emitted = []
+        context = SimpleNamespace(emit_result=emitted.append)
+        sessions = {}
+        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        original = module._AudioEncoder
+        module._AudioEncoder = FakeEncoder
+        channel = {"id": "command-call", "caller": {}, "dialplan": {}}
+        try:
+            await block._handle_event(context, client, settings, sessions, {
+                "type": "StasisStart", "channel": channel,
+            }, audio)
+            session = sessions["command-call"]
+            assert session.command_started and session.transport is not None
+            port = session.transport.get_extra_info("socket").getsockname()[1]
+            packet = bytes([0x80, 0x00, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]) + b"pcm-sample"
+            with __import__("socket").socket(__import__("socket").AF_INET, __import__("socket").SOCK_DGRAM) as sender:
+                sender.sendto(packet, ("127.0.0.1", port))
+            end = time.monotonic() + 2
+            while not audio.publications and time.monotonic() < end:
+                await asyncio.sleep(0.01)
+            assert audio.publications, "Audio was not published for the command session"
+            await block._handle_event(context, client, settings, sessions, {
+                "type": "StasisEnd", "channel": channel,
+            }, audio)
+            assert not sessions
+            commands = [result for result in emitted
+                        if result.outputs and result.outputs[0].port_id == 3]
+            assert len(commands) == 2
+            start = json.loads(commands[0].outputs[0].value)
+            stop = json.loads(commands[1].outputs[0].value)
+            assert start == {"action": "start", "stream_id": "ari-command-call"}
+            assert stop["action"] == "stop" and stop["stream_id"] == "ari-command-call"
+            assert stop["frame_count"] == len(audio.publications) >= 1
+            assert stop["byte_count"] == sum(len(item[1]) for item in audio.publications)
+            assert stop["aborted"] is False
+            for command in commands:
+                assert command.outputs[0].port_name == "command_out"
+                assert command.outputs[0].content_type == "application/json"
+        finally:
+            module._AudioEncoder = original
+            await session.close()
+
+    asyncio.run(scenario())
+
+
 def test_audio_media_attach_publish_and_release():
     """FB2/FB5: external media, RTP pumping, Opus publication and cleanup work."""
     from blocs.telephony_in.block import _MediaSession
@@ -367,6 +425,10 @@ def test_audio_media_attach_publish_and_release():
             assert audio.publications[0][2]["codec"] == "opus"
             assert audio.publications[0][2]["sample_rate_hz"] == 48000
             assert audio.publications[0][2]["channels"] == 1
+            assert audio.publications[0][2]["sequence"] == 1
+            await session.finish_media()
+            assert session.frame_count == len(audio.publications)
+            assert session.byte_count == sum(len(item[1]) for item in audio.publications)
             paths = [args[0][1] for args in client.requests]
             assert paths == ["/channels/externalMedia", "/bridges", "/bridges/bridge-1/addChannel"]
         finally:
@@ -379,6 +441,7 @@ def main():
     test_contract_config_ports_ui()
     test_centralized_simulation()
     test_event_normalization_and_listener_emission()
+    test_correlated_audio_commands()
     test_audio_media_attach_publish_and_release()
     test_media_setup_failure_releases_transport()
     test_real_opus_encoder()

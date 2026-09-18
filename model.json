@@ -1,7 +1,7 @@
 {
   "kind": "telephony_in",
   "title": "Telephony In",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "bloxsmith_compatibility": [
     "1.0.9"
   ],
@@ -40,6 +40,16 @@
           ],
           "overflow_policy": "drop_oldest"
         }
+      },
+      {
+        "id": 3,
+        "name": "command_out",
+        "title": "Command Out",
+        "emits": [
+          "application/json"
+        ],
+        "multiplicity": "many",
+        "transport": "message"
       }
     ]
   },
@@ -83,7 +93,7 @@
     "allow_required_input": false,
     "default_required": false,
     "max_inputs": 0,
-    "max_outputs": 2,
+    "max_outputs": 3,
     "default_input_accepts": [],
     "default_output_emits": [
       "application/json"
