@@ -1,3 +1,43 @@
-[data-block-release="telephony_in@0.2.0"] .telephony-in-card{display:grid;gap:4px;padding:10px;color:var(--cw-text,#e5e7eb)}
-[data-block-release="telephony_in@0.2.0"] .telephony-in-card span{font-size:12px;opacity:.78}
-[data-block-release="telephony_in@0.2.0"] .telephony-in-help{font-size:13px;line-height:1.45}
+/* Release-scoped polish only. The canvas card, modal and inspector use the shared
+   framework classes, so every surface stays readable and theme-correct even when
+   this stylesheet is not applied (bundled nodes carry no release scope). */
+[data-block-release="telephony_in@0.0.1"] .telephony-in-summary {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+[data-block-release="telephony_in@0.0.1"] .telephony-in-ui .checkbox-line {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 14px;
+  color: var(--ink);
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+[data-block-release="telephony_in@0.0.1"] .telephony-in-ui .checkbox-line input {
+  width: auto;
+  margin-top: 2px;
+}
+[data-block-release="telephony_in@0.0.1"] .telephony-in-ui .group-label {
+  display: block;
+  margin: 18px 0 10px;
+}
+[data-block-release="telephony_in@0.0.1"] .telephony-in-ui code {
+  overflow-wrap: anywhere;
+}
+[data-block-release="telephony_in@0.0.1"] .telephony-in-ui > .inspector-actions {
+  gap: 12px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+[data-block-release="telephony_in@0.0.1"] .telephony-in-ui > .inspector-actions .field-hint {
+  margin-right: auto;
+}

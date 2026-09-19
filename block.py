@@ -66,10 +66,6 @@ class TelephonyInError(RuntimeError):
     """Stable block-owned validation or transport failure."""
 
 
-class BlockRenderError(RuntimeError):
-    """Stable failure for invalid block-owned UI rendering."""
-
-
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     """Return one bounded integer, accepting only integral numeric text."""
 
@@ -146,6 +142,29 @@ def config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "ffmpeg_chunk_ms": _bounded_int(source.get("ffmpeg_chunk_ms", 100), 100, 20, 1000),
         "max_calls": _bounded_int(source.get("max_calls", 1), 1, 1, 8),
     }
+
+
+def display_config(raw: Mapping[str, Any] | None) -> tuple[dict[str, Any], str]:
+    """Return configuration values for UI rendering plus an optional warning.
+
+    Runtime paths keep the strict ``config`` validation. A surface must stay usable
+    even when a stored value is invalid, otherwise the user cannot open the modal to
+    correct it. The stored values are therefore returned as they are, so the offending
+    one stays visible next to the reported reason.
+
+    Args:
+        raw: Untrusted persisted node configuration.
+
+    Returns:
+        A pair of displayable values and a validation message, empty when valid.
+    """
+
+    try:
+        return config(raw), ""
+    except TelephonyInError as error:
+        stored = dict(raw) if isinstance(raw, Mapping) else {}
+        values = {key: stored.get(key, default) for key, default in DEFAULTS.items()}
+        return values, str(error)
 
 
 def _secret(context: Any, value_ref: str) -> str:
@@ -363,58 +382,93 @@ class TelephonyInBlock(BlockDefinition):
     kind = "telephony_in"
 
     def render_node_card(self, *, node: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Render the compact canvas summary owned by this block."""
+        """Render the canvas card using the shared node head, title and preview chrome."""
 
-        config_value = config(node.get("config"))
+        values, _ = display_config(node.get("config"))
         return render_node_card_template(
             block=self, node=node,
             replacements={
                 "title": node.get("title") or self.default_title(),
-                "ari_app": config_value["ari_app"],
-                "capture": "Audio + events" if config_value["capture_audio"] else "Events only",
+                "ari_target": f"ARI · {values['ari_app']}",
+                "capture": "Audio + événements" if values["capture_audio"] else "Événements seuls",
             },
             node_classes=["telephony-in-node"],
         )
 
-    def render_inspector_panel(self, *, node: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Render the block-owned inspector through the shared public helper."""
+    def _ui_replacements(self, values: Mapping[str, Any], warning: str) -> dict[str, str]:
+        """Build the placeholder values shared by the modal and the inspector panel.
 
-        template = (self.directory / "inspector_panel.html").read_text(encoding="utf-8")
-        return {"html": render_inspector_template(template=template, node=node, payload=payload),
-                "context": {"node_id": str(node.get("id") or ""), "node_kind": self.kind}}
+        Args:
+            values: Displayable configuration returned by ``display_config``.
+            warning: Validation message to surface, or an empty string.
 
-    def render_modal(self, *, node: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Render generic settings with a clear, user-labelled ARI secret field.
-
-        The configured value is a vault reference, not the ARI password. Keeping
-        it visible makes mistakes easy to detect while the real secret remains
-        stored in the BloxSmith vault.
+        Returns:
+            Escaped placeholder values keyed without their surrounding markers.
         """
 
-        rendered = super().render_modal(node=node, payload=payload)
-        html = rendered.get("html", "")
-        config_value = config(node.get("config"))
-        field = (
-            '<div class="field-group"><label>ARI secret'
-            '<input data-block-config-field="ari_password_ref" type="text" '
-            f'value="{escape(config_value["ari_password_ref"], quote=True)}" '
-            'autocomplete="off" spellcheck="false" '
-            'placeholder="secret://workspace/asterisk_secret" /></label></div>'
+        def text(key: str) -> str:
+            return escape(str(values.get(key, "")), quote=True)
+
+        target = f"{values.get('ari_base_url', '')} · {values.get('ari_app', '')}"
+        return {
+            "ari_base_url": text("ari_base_url"),
+            "ari_username": text("ari_username"),
+            "ari_password_ref": text("ari_password_ref"),
+            "ari_app": text("ari_app"),
+            "ari_target": escape(target, quote=True),
+            "expected_context": text("expected_context"),
+            "expected_extension": text("expected_extension"),
+            "media_host": text("media_host"),
+            "media_port": text("media_port"),
+            "ffmpeg_chunk_ms": text("ffmpeg_chunk_ms"),
+            "max_calls": text("max_calls"),
+            "auto_answer_checked": "checked" if values.get("auto_answer") else "",
+            "capture_audio_checked": "checked" if values.get("capture_audio") else "",
+            "config_warning": (
+                f'<p class="field-hint is-error">{escape(warning)} Corrigez la valeur puis appliquez.</p>'
+                if warning else ""
+            ),
+        }
+
+    def render_inspector_panel(self, *, node: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Render the control panel with every editable setting of the block.
+
+        The panel exposes the same attributes as the modal so a call gateway can be
+        adjusted without opening it. Values come from ``display_config`` so an invalid
+        stored setting stays visible and correctable instead of breaking the surface.
+        """
+
+        values, warning = display_config(node.get("config"))
+        template = (self.directory / "inspector_panel.html").read_text(encoding="utf-8")
+        html = render_inspector_template(
+            template=template,
+            node={**node, "type": self.kind, "kind": self.kind},
+            payload=payload,
+            replacements={
+                **self._ui_replacements(values, warning),
+                "node_icon": "TEL",
+                "node_kind": "Telephony In",
+                "node_tag": "Source",
+            },
         )
-        html, replaced = re.subn(
-            r'<div class="field-group"><label>Ari password ref</label>'
-            r'<input data-block-config-field="ari_password_ref"'
-            r' data-block-skip-empty="true" type="password"'
-            r' autocomplete="off" spellcheck="false"'
-            r' placeholder="[^"]*" /></div>',
-            field,
-            html,
-            count=1,
-        )
-        if replaced != 1:
-            raise BlockRenderError("Le champ ARI secret n'a pas pu etre rendu.")
-        rendered["html"] = html
-        return rendered
+        return {"html": html, "context": {"node_id": str(node.get("id") or ""), "node_kind": self.kind,
+                                          "full_panel": True}}
+
+    def render_modal(self, *, node: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Render the block-owned settings modal from its own grouped template.
+
+        Every control is declared in ``block_modal.html`` instead of being patched into
+        generically generated markup: labels, bounds and hints belong to the block, and
+        the surface no longer depends on the framework's internal field rendering. The
+        ARI secret stays a visible vault reference, never the password itself.
+        """
+
+        values, warning = display_config(node.get("config"))
+        template = (self.directory / "block_modal.html").read_text(encoding="utf-8")
+        html = self._render_generic_modal_template(template=template, node=node, payload=payload or {})
+        for key, value in self._ui_replacements(values, warning).items():
+            html = html.replace(f"{{{{ {key} }}}}", value)
+        return {"html": html, "context": {"node_id": str(node.get("id") or ""), "node_kind": self.kind}}
 
     def prepare_runtime(self, context: BlockRuntimePreparationContext) -> BlockRuntimePreparation:
         """Validate early and request the persistent listener in Active Runtime."""
@@ -590,9 +644,21 @@ class TelephonyInBlock(BlockDefinition):
             "encapsulation": "rtp", "transport": "udp", "connection_type": "client", "format": "slin16",
         })
         session.external_channel_id = str(external.get("id") or "")
+        external_vars = external.get("channelvars") if isinstance(external.get("channelvars"), dict) else {}
+        asterisk_host = str(external_vars.get("UNICASTRTP_LOCAL_ADDRESS") or "")
+        asterisk_port = int(external_vars.get("UNICASTRTP_LOCAL_PORT") or 0)
+        if asterisk_host and asterisk_port > 0:
+            # Start return media immediately instead of waiting for the first inbound RTP packet.
+            # Asterisk 20 uses dynamic payload type 118 for slin16 (640 bytes / 20 ms).
+            session.rtp_remote_addr = (asterisk_host, asterisk_port)
+            session.rtp_payload_type = 118
+            session.rtp_payload_size = 640
         bridge = await client.request("POST", "/bridges", data={"type": "mixing"})
         session.bridge_id = str(bridge.get("id") or "")
         await client.request("POST", f"/bridges/{session.bridge_id}/addChannel", data={"channel": f"{session.channel_id},{session.external_channel_id}"})
+        # A short real-media playback opens the PJSIP/RTP path through NAT.  RTP silence
+        # returned to externalMedia keeps that path alive after the playback finishes.
+        await client.request("POST", f"/bridges/{session.bridge_id}/play", data={"media": "sound:silence/1"})
         session.pump_task = asyncio.create_task(self._pump_media(session, encoder, queue, audio))
 
     @staticmethod
@@ -650,10 +716,7 @@ class TelephonyInBlock(BlockDefinition):
             session.rtp_remote_addr = remote_addr
             session.rtp_payload_type = payload_type
             session.rtp_payload_size = len(payload)
-            # Asterisk can stop external media after a short interval without return RTP.
-            # Answer every inbound packet and keep sending 20 ms silence if intake pauses.
-            if remote_addr:
-                TelephonyInBlock._send_rtp_silence(session, remote_addr, payload_type, len(payload))
+            # Inbound packets refresh negotiation; one monotonic 20 ms sender owns the return cadence.
             chunks = await encoder.feed(payload)
             if audio is not None:
                 for chunk in chunks:

@@ -89,11 +89,19 @@ def test_contract_config_ports_ui():
             raise AssertionError(f"Invalid setting accepted: {values}")
 
     block = TelephonyInBlock()
-    assert block.model["version"] == "0.2.0"
+    assert block.model["version"] == "0.0.1"
     command_port = next(port for port in block.model["ports"]["outputs"] if port["name"] == "command_out")
     assert command_port["id"] == 3 and command_port["transport"] == "message"
     assert block.prepare_runtime(preparation_context("centralized")).listen_on_run is False
     assert block.prepare_runtime(preparation_context("zeromq_active")).listen_on_run is True
+    assert "node_card" not in block.model, "Telephony must use the renderer's standard node geometry"
+    # Release assets are scoped to the declared version; a stale scope silently applies to nothing.
+    scope = f'[data-block-release="telephony_in@{block.model["version"]}"]'
+    block_css = (Path(__file__).parents[1] / "assets/css/block_ui.css").read_text(encoding="utf-8")
+    assert scope in block_css, "Release CSS must be scoped to the declared block version"
+    for declared in block.model["ui_assets"].values():
+        for asset in declared:
+            assert (Path(__file__).parents[1] / asset["path"]).is_file(), asset["path"]
     bad = preparation_context("centralized", {"ari_app": ""})
     try:
         block.prepare_runtime(bad)
@@ -112,12 +120,9 @@ def test_contract_config_ports_ui():
     modal = block.render_modal(node=node)["html"]
     inspector = block.render_inspector_panel(node=node)["html"]
     card = block.render_node_card(node=node)["html"]
-    assert 'data-block-config-field="ari_app"' in modal
-    assert 'data-block-config-field="ari_password_ref"' in modal
     assert 'data-block-title-field' in modal, "Modal title must use the generic editable binding."
-    assert 'data-block-apply' in modal, "Modal must expose the generic Apply action."
+    assert modal.count("data-block-apply") == 1, "Exactly one Apply control can own the dirty state."
     assert 'data-block-modal-apply' not in modal, "Legacy apply binding must not return."
-    assert '<label>ARI secret<input' in modal, "Secret reference must use the clear ARI secret label."
     assert 'placeholder="secret://workspace/asterisk_secret"' in modal
     assert 'type="password"' not in modal, "The vault reference is not itself a secret and stays visible."
     assert 'data-block-skip-empty' not in modal, "Users must be able to clear the secret reference."
@@ -127,6 +132,40 @@ def test_contract_config_ports_ui():
     assert f'value="{secret_ref}"' in modal, "Existing vault reference must render in clear text."
     assert "Ports" in inspector and "bloxsmith" in card
     assert "raw password" not in modal
+    # The card reuses the shared canvas chrome so it stays homogeneous with standard blocks.
+    for markup in ("node-head", "node-type-pill", "<h3>", "node-owned-card-preview"):
+        assert markup in card, f"Canvas card must use the shared {markup} chrome"
+
+
+def test_ui_surfaces_expose_every_setting():
+    """FB7: modal and control panel expose every editable attribute and survive bad values."""
+    block = TelephonyInBlock()
+    node = block.build_node_payload(node_id="tele-ui")
+    surfaces = {
+        "modal": block.render_modal(node=node)["html"],
+        "inspector": block.render_inspector_panel(node=node)["html"],
+    }
+    bounds = {"max_calls": ('min="1"', 'max="8"'), "media_port": ('min="0"', 'max="65535"'),
+              "ffmpeg_chunk_ms": ('min="20"', 'max="1000"')}
+    for name, html in surfaces.items():
+        assert "{{" not in html, f"Unreplaced placeholder in the {name} surface"
+        for key in DEFAULTS:
+            assert f'data-block-config-field="{key}"' in html, f"{key} is not editable in the {name}"
+        for key, limits in bounds.items():
+            assert all(limit in html for limit in limits), f"{key} bounds are missing in the {name}"
+        for checkbox in ("auto_answer", "capture_audio"):
+            assert f'data-block-config-field="{checkbox}" data-block-value-type="boolean" type="checkbox"' in html
+        assert html.count("<label") >= len(DEFAULTS), f"Each control needs its own label in the {name}"
+    assert "data-node-title-input" in surfaces["inspector"], "The control panel must rename its node"
+    assert "data-block-apply" in surfaces["inspector"], "The control panel must apply its own edits"
+
+    # An invalid stored value must keep every surface open, otherwise it cannot be corrected.
+    broken = block.build_node_payload(node_id="tele-broken")
+    broken["config"]["ffmpeg_chunk_ms"] = 5
+    for html in (block.render_modal(node=broken)["html"], block.render_inspector_panel(node=broken)["html"]):
+        assert 'class="field-hint is-error"' in html, "An invalid setting must be reported in place"
+        assert 'value="5"' in html, "The rejected value stays visible so it can be corrected"
+    assert block.render_node_card(node=broken)["html"], "The canvas card must survive an invalid setting"
 
 
 def test_centralized_simulation():
@@ -388,6 +427,10 @@ def test_correlated_audio_commands():
             while not audio.publications and time.monotonic() < end:
                 await asyncio.sleep(0.01)
             assert audio.publications, "Audio was not published for the command session"
+            end = time.monotonic() + 2
+            while session.rtp_sent_packet_count < 1 and time.monotonic() < end:
+                await asyncio.sleep(0.01)
+            assert session.rtp_sent_packet_count >= 1, "Return RTP cadence did not start"
             await block._handle_event(context, client, settings, sessions, {
                 "type": "StasisEnd", "channel": channel,
             }, audio)
@@ -475,19 +518,65 @@ def test_audio_media_attach_publish_and_release():
             assert session.frame_count == len(audio.publications)
             assert session.byte_count == sum(len(item[1]) for item in audio.publications)
             paths = [args[0][1] for args in client.requests]
-            assert paths == ["/channels/externalMedia", "/bridges", "/bridges/bridge-1/addChannel"]
+            assert paths == ["/channels/externalMedia", "/bridges", "/bridges/bridge-1/addChannel",
+                             "/bridges/bridge-1/play"]
+            assert client.requests[-1][1]["data"]["media"] == "sound:silence/1"
         finally:
             module._AudioEncoder = original
             await session.close()
     asyncio.run(scenario())
 
 
+def test_proactive_rtp_before_inbound_media():
+    """FB5: external-media return RTP starts before Asterisk sends inbound audio."""
+    from blocs.telephony_in.block import _MediaSession
+
+    async def scenario():
+        socket = __import__("socket")
+        client = AsyncRequestRecorder()
+        audio = FakeAudioClient()
+        block = TelephonyInBlock()
+        settings = config({**DEFAULTS, "ari_password_ref": REF})
+        session = _MediaSession(call_id="call-proactive", channel_id="caller-proactive")
+        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        original = module._AudioEncoder
+        module._AudioEncoder = FakeEncoder
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as asterisk_media:
+            asterisk_media.bind(("127.0.0.1", 0))
+            asterisk_media.settimeout(2)
+            host, port = asterisk_media.getsockname()
+            client.responses = [{
+                "id": "external-proactive",
+                "channelvars": {
+                    "UNICASTRTP_LOCAL_ADDRESS": host,
+                    "UNICASTRTP_LOCAL_PORT": str(port),
+                },
+            }, {"id": "bridge-proactive"}]
+            try:
+                await block._start_media(client, settings, session, audio)
+                loop = asyncio.get_running_loop()
+                first, _ = await loop.run_in_executor(None, asterisk_media.recvfrom, 65536)
+                assert first[0] & 0xc0 == 0x80
+                assert first[1] == 0x80 | 118, "Proactive slin16 RTP uses payload type 118"
+                assert len(first) == 652, "Proactive RTP sends one 20 ms slin16 frame"
+                second, _ = await loop.run_in_executor(None, asterisk_media.recvfrom, 65536)
+                assert second[1] == 118, "Only the first proactive RTP packet sets the marker"
+                assert int.from_bytes(second[4:8], "big") == 320
+            finally:
+                module._AudioEncoder = original
+                await session.close()
+
+    asyncio.run(scenario())
+
+
 def main():
     test_contract_config_ports_ui()
+    test_ui_surfaces_expose_every_setting()
     test_centralized_simulation()
     test_event_normalization_and_listener_emission()
     test_correlated_audio_commands()
     test_audio_media_attach_publish_and_release()
+    test_proactive_rtp_before_inbound_media()
     test_rtp_payload_skips_extension_header()
     test_media_setup_failure_releases_transport()
     test_real_opus_encoder()

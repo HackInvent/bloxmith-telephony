@@ -1,7 +1,7 @@
 # Telephony In
 
 <!-- block-metadata:start -->
-[![Block version: 0.2.0](https://img.shields.io/badge/block-0.2.0-blue)](model.json)
+[![Block version: 0.0.1](https://img.shields.io/badge/block-0.0.1-blue)](model.json)
 [![BloxSmith compatibility: 1.0.9](https://img.shields.io/badge/BloxSmith-1.0.9-brightgreen)](compatibility.json)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -100,13 +100,25 @@ Normal capture commands are:
 {"action":"stop","stream_id":"ari-channel-id","frame_count":132,"byte_count":184217,"aborted":false}
 ```
 
-The stop command is emitted only after RTP intake has stopped and encoded frames have drained. `frame_count` and `byte_count` are exact published totals. `aborted` is `true` if Active Runtime stops while a call is still active. Existing `0.1.0` nodes must be recreated to obtain the fixed three-port contract.
+The stop command is emitted only after RTP intake has stopped and encoded frames have drained. `frame_count` and `byte_count` are exact published totals. `aborted` is `true` if Active Runtime stops while a call is still active. A node created before the fixed three-port contract must be recreated.
+
+## Block surfaces
+
+The three surfaces are block-owned and reuse the shared editor chrome, so they stay consistent with the standard blocks and follow the active theme.
+
+- **Canvas card**: standard node geometry derived from the three outputs, with the shared head, title and preview chrome. It shows the ARI application and whether audio capture is enabled.
+- **Control panel** (inspector): every editable attribute, grouped into ARI connection, inbound calls, and audio and media, plus the node name, the port list and the Apply, Duplicate and Delete actions. The gateway can be adjusted without opening the modal.
+- **Settings modal**: the same attributes in four sections, each control carrying its own label, its validation bounds and a hint. Apply and Close stay reachable below the scrolling body.
+
+Numeric controls declare the same bounds as the runtime validator. A stored value that fails validation does not break a surface: the offending setting falls back to its default, the reason is reported next to the fields, and the value can be corrected in place.
+
+Release assets declared in `model.json.ui_assets` are scoped to `telephony_in@<version>`, which the editor applies to installed releases. Every surface must therefore remain readable through the shared classes alone, since a bundled node carries no release scope.
 
 ## Runtime behavior
 
 ### Active Runtime (`zeromq_active`)
 
-After Run, the persistent listener connects to Asterisk ARI. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, receives RTP, returns standards-compliant 20 ms RTP silence (including the first-packet marker), transcodes Asterisk's big-endian `slin16` PCM to Opus/Ogg, and publishes frames through `audio_out`. `StasisEnd` releases media and emits `call.ended`. A media setup failure releases the local transport and emits `call.failed` before a redacted runtime error.
+After Run, the persistent listener connects to Asterisk ARI. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, plays Asterisk's built-in one-second silence prompt to open the PJSIP/RTP path, uses Asterisk's `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT` to start standards-compliant 20 ms RTP silence immediately, receives RTP, transcodes Asterisk's big-endian `slin16` PCM to Opus/Ogg, and publishes frames through `audio_out`. The playback is inaudible; it forces real media through NAT until the block's return RTP takes over. The payload type and frame size are refined from inbound RTP when it arrives. `StasisEnd` releases media and emits `call.ended`. A media setup failure releases the local transport and emits `call.failed` before a redacted runtime error.
 
 ### One Shot Simulation (`centralized`)
 
@@ -137,7 +149,9 @@ exten => s,1,Stasis(bloxsmith)
  same => n,Hangup()
 ```
 
-The block needs ARI access and, for audio, permission to create bridges and external media channels. FFmpeg must be installed with `libopus`.
+The block needs ARI access and, for audio, permission to create bridges, play media, and create external media channels. FFmpeg must be installed with `libopus`, and Asterisk's core `sound:silence/1` prompt must be installed.
+
+When Asterisk is behind NAT, configure the PJSIP transport with `local_net`, `external_media_address`, and `external_signaling_address`. Route the SIP UDP port and Asterisk RTP UDP range to the Asterisk host. Otherwise OVH can answer the SIP dialog but drop the call after its media timeout even though ARI setup succeeds.
 
 ## Example
 
@@ -156,7 +170,7 @@ The block needs ARI access and, for audio, permission to create bridges and exte
 - Live calls require Active Runtime and a reachable Asterisk service.
 - The block captures only calls Asterisk routes into its Stasis application.
 - The current release does not dial outbound calls, play prompts, collect DTMF, record files itself, or transcribe audio.
-- RTP delivery is transient; there is no persisted event journal or replay in version 0.2.0.
+- RTP delivery is transient; there is no persisted event journal or replay.
 - Asterisk, RTP and FFmpeg failures stop the affected capture and surface a redacted runtime error.
 - Never expose the ARI HTTP/WebSocket port, SIP port, or RTP range directly to untrusted networks.
 - Recording telephone calls can require caller consent and may be regulated; configure and retain audio only where lawful.

@@ -1,7 +1,7 @@
 {
   "kind": "telephony_in",
   "title": "Telephony In",
-  "version": "0.2.0",
+  "version": "0.0.1",
   "bloxsmith_compatibility": [
     "1.0.9"
   ],
@@ -99,20 +99,6 @@
       "application/json"
     ],
     "default_multiplicity": "many"
-  },
-  "node_card": {
-    "layout": {
-      "variant": "compact",
-      "width": 220,
-      "height": 82,
-      "min_width": 180,
-      "min_height": 72,
-      "max_width": 320,
-      "max_height": 120,
-      "classes": [
-        "telephony-in-node"
-      ]
-    }
   },
   "runtime": {
     "initial_state": "waiting",

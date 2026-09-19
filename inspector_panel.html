@@ -1,17 +1,107 @@
 <div class="cw-block-inspector telephony-in-ui" data-block-inspector-root data-node-id="{{ node_id }}" data-node-type="{{ node_type }}">
-  <div class="inspector-selection">
-    <div class="inspector-node-card"><div class="inspector-node-copy">
-      <strong>{{ node_title }}</strong><span>OVH/Asterisk inbound calls</span>
-    </div></div>
+  <div class="inspector-selection {{ summary_hidden }}" data-node-type="{{ node_type }}">
+    <div class="inspector-node-card">
+      <div class="inspector-node-icon">{{ node_icon }}</div>
+      <div class="inspector-node-copy">
+        <strong>{{ node_title }}</strong>
+        <span>{{ node_kind }}</span>
+      </div>
+      <span class="inspector-node-tag">{{ node_tag }}</span>
+    </div>
     <div class="inspector-tabs">
-      <button class="inspector-tab {{ general_active }}" data-inspector-tab="general" type="button">General</button>
+      <button class="inspector-tab {{ general_active }}" data-inspector-tab="general" type="button">Général</button>
       <button class="inspector-tab {{ ports_active }}" data-inspector-tab="ports" type="button">Ports</button>
     </div>
   </div>
+
   <div class="inspector-view {{ general_hidden }}" data-inspector-panel-tab="general">
+    <div class="field-group {{ title_hidden }}">
+      <label for="{{ node_id }}InspName">Nom du node</label>
+      <input id="{{ node_id }}InspName" data-node-title-input type="text" placeholder="{{ node_title_placeholder }}" value="{{ node_title }}" />
+    </div>
+
+    {{ config_warning }}
+
+    <span class="group-label">Connexion ARI</span>
+    <div class="field-group">
+      <label for="{{ node_id }}InspUrl">URL du service ARI</label>
+      <input id="{{ node_id }}InspUrl" data-block-config-field="ari_base_url" type="text" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:8088" value="{{ ari_base_url }}" />
+    </div>
+    <div class="field-grid">
+      <div class="field-group">
+        <label for="{{ node_id }}InspUser">Utilisateur</label>
+        <input id="{{ node_id }}InspUser" data-block-config-field="ari_username" type="text" autocomplete="off" spellcheck="false" value="{{ ari_username }}" />
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}InspApp">Application Stasis</label>
+        <input id="{{ node_id }}InspApp" data-block-config-field="ari_app" type="text" autocomplete="off" spellcheck="false" value="{{ ari_app }}" />
+      </div>
+    </div>
+    <div class="field-group">
+      <label for="{{ node_id }}InspSecret">Référence du secret ARI</label>
+      <input id="{{ node_id }}InspSecret" data-block-config-field="ari_password_ref" type="text" autocomplete="off" spellcheck="false" placeholder="secret://workspace/asterisk_secret" value="{{ ari_password_ref }}" />
+      <p class="field-hint">Référence vers le coffre, jamais le mot de passe. Videz le champ pour la retirer.</p>
+    </div>
+
+    <span class="group-label">Appels entrants</span>
+    <div class="field-grid">
+      <div class="field-group">
+        <label for="{{ node_id }}InspContext">Contexte attendu</label>
+        <input id="{{ node_id }}InspContext" data-block-config-field="expected_context" type="text" autocomplete="off" spellcheck="false" placeholder="Tous" value="{{ expected_context }}" />
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}InspExtension">Extension attendue</label>
+        <input id="{{ node_id }}InspExtension" data-block-config-field="expected_extension" type="text" autocomplete="off" spellcheck="false" placeholder="Toutes" value="{{ expected_extension }}" />
+      </div>
+    </div>
+    <div class="field-group">
+      <label for="{{ node_id }}InspMaxCalls">Appels simultanés (1 à 8)</label>
+      <input id="{{ node_id }}InspMaxCalls" data-block-config-field="max_calls" data-block-value-type="integer" type="number" min="1" max="8" step="1" value="{{ max_calls }}" />
+    </div>
+    <label class="checkbox-line" for="{{ node_id }}InspAnswer">
+      <input id="{{ node_id }}InspAnswer" data-block-config-field="auto_answer" data-block-value-type="boolean" type="checkbox" {{ auto_answer_checked }} />
+      <span>Décrocher automatiquement</span>
+    </label>
+
+    <span class="group-label">Audio et média</span>
+    <label class="checkbox-line" for="{{ node_id }}InspCapture">
+      <input id="{{ node_id }}InspCapture" data-block-config-field="capture_audio" data-block-value-type="boolean" type="checkbox" {{ capture_audio_checked }} />
+      <span>Capturer l'audio sur <code>audio_out</code></span>
+    </label>
+    <div class="field-grid">
+      <div class="field-group">
+        <label for="{{ node_id }}InspMediaHost">Hôte média</label>
+        <input id="{{ node_id }}InspMediaHost" data-block-config-field="media_host" type="text" autocomplete="off" spellcheck="false" value="{{ media_host }}" />
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}InspMediaPort">Port (0 = auto)</label>
+        <input id="{{ node_id }}InspMediaPort" data-block-config-field="media_port" data-block-value-type="integer" type="number" min="0" max="65535" step="1" value="{{ media_port }}" />
+      </div>
+    </div>
+    <div class="field-group">
+      <label for="{{ node_id }}InspChunk">Trame encodée (20 à 1000 ms)</label>
+      <input id="{{ node_id }}InspChunk" data-block-config-field="ffmpeg_chunk_ms" data-block-value-type="integer" type="number" min="20" max="1000" step="10" value="{{ ffmpeg_chunk_ms }}" />
+    </div>
+
+    <p class="inspector-copy">Cible actuelle : <strong>{{ ari_target }}</strong>. Les réglages sont pris en compte au prochain démarrage du Run ; les appels en cours gardent leur configuration.</p>
+
+    <div class="inspector-actions {{ actions_hidden }}">
+      <button class="solid-btn" data-block-apply type="button" disabled>Appliquer</button>
+      <button class="ghost-btn {{ duplicate_hidden }}" data-block-action="duplicate" type="button">Dupliquer</button>
+      <button class="danger-btn {{ delete_hidden }}" data-block-action="delete" type="button">Supprimer</button>
+    </div>
   </div>
+
   <div class="inspector-view {{ ports_hidden }}" data-inspector-panel-tab="ports">
-    <div class="ports-editor-section"><span class="group-label">Inputs</span>{{ inputs_html }}</div>
-    <div class="ports-editor-section"><span class="group-label">Outputs</span>{{ outputs_html }}</div>
+    <div class="ports-editor-section">
+      <div class="ports-editor-header"><span class="group-label">Entrées</span></div>
+      <div class="ports-editor-list">{{ inputs_html }}</div>
+      <p class="field-hint">Ce bloc est une source : il n'accepte aucune entrée.</p>
+    </div>
+    <div class="ports-editor-section">
+      <div class="ports-editor-header"><span class="group-label">Sorties</span></div>
+      <div class="ports-editor-list">{{ outputs_html }}</div>
+      <p class="field-hint">Les trois sorties sont fixes : <code>event_out</code>, <code>audio_out</code> et <code>command_out</code>. Un node dont les ports ont été modifiés doit être recréé.</p>
+    </div>
   </div>
 </div>

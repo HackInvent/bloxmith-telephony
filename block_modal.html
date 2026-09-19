@@ -1,10 +1,101 @@
 <div class="modal-panel block-config-modal telephony-in-ui" role="dialog" aria-modal="true" aria-labelledby="{{ node_id }}TelephonyTitle" data-generic-block-modal-root data-node-id="{{ node_id }}" data-node-kind="{{ node_kind }}">
-  <div class="modal-header"><div><span class="panel-kicker">OVH/Asterisk</span><h2 id="{{ node_id }}TelephonyTitle">{{ node_title }}</h2></div><button class="ghost-btn" data-close-block-modal type="button">Close</button></div>
-  <div class="block-config-modal-body">
-    <div class="field-group"><label>Block title<input data-block-title-field type="text" autocomplete="off" value="{{ node_title }}" /></label></div>
-    {{ config_fields_html }}
-    <details><summary>Ports</summary><div>{{ ports_html }}</div></details>
-    <details><summary>Runtime state</summary><div>{{ runtime_html }}</div></details>
+  <div class="modal-header">
+    <div>
+      <span class="panel-kicker">Bloc {{ node_kind_title }}</span>
+      <h2 id="{{ node_id }}TelephonyTitle">{{ node_title }}</h2>
+    </div>
+    <div class="modal-actions">
+      <button class="ghost-btn" data-close-block-modal type="button">Fermer</button>
+    </div>
   </div>
-  <div class="block-config-actions"><button class="solid-btn" data-block-apply type="button">Apply</button></div>
+
+  <div class="block-config-modal-body">
+    <section class="ports-editor-section">
+      <div class="ports-editor-header"><span class="group-label">Connexion ARI</span></div>
+      {{ config_warning }}
+      <p class="telephony-in-summary">Cible actuelle : <strong>{{ ari_target }}</strong></p>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyName">Nom du bloc</label>
+        <input id="{{ node_id }}TelephonyName" data-block-title-field type="text" autocomplete="off" value="{{ node_title }}" />
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyUrl">URL du service ARI</label>
+        <input id="{{ node_id }}TelephonyUrl" data-block-config-field="ari_base_url" type="text" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:8088" value="{{ ari_base_url }}" />
+        <p class="field-hint">Asterisk local, en HTTP ou HTTPS. N'exposez jamais ce port à un réseau non maîtrisé.</p>
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyUser">Utilisateur ARI</label>
+        <input id="{{ node_id }}TelephonyUser" data-block-config-field="ari_username" type="text" autocomplete="off" spellcheck="false" value="{{ ari_username }}" />
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonySecret">Référence du secret ARI</label>
+        <input id="{{ node_id }}TelephonySecret" data-block-config-field="ari_password_ref" type="text" autocomplete="off" spellcheck="false" placeholder="secret://workspace/asterisk_secret" value="{{ ari_password_ref }}" />
+        <p class="field-hint">Référence vers le coffre BloxSmith, jamais le mot de passe lui-même. Elle reste visible pour repérer une erreur de saisie ; videz le champ pour la retirer.</p>
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyApp">Application Stasis</label>
+        <input id="{{ node_id }}TelephonyApp" data-block-config-field="ari_app" type="text" autocomplete="off" spellcheck="false" value="{{ ari_app }}" />
+        <p class="field-hint">Doit correspondre à <code>Stasis(...)</code> dans le dialplan Asterisk.</p>
+      </div>
+    </section>
+
+    <section class="ports-editor-section">
+      <div class="ports-editor-header"><span class="group-label">Appels entrants</span></div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyContext">Contexte attendu</label>
+        <input id="{{ node_id }}TelephonyContext" data-block-config-field="expected_context" type="text" autocomplete="off" spellcheck="false" placeholder="Tous les contextes" value="{{ expected_context }}" />
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyExtension">Extension attendue</label>
+        <input id="{{ node_id }}TelephonyExtension" data-block-config-field="expected_extension" type="text" autocomplete="off" spellcheck="false" placeholder="Toutes les extensions" value="{{ expected_extension }}" />
+        <p class="field-hint">Laissez vide pour accepter tout appel routé vers l'application Stasis.</p>
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyMaxCalls">Appels simultanés</label>
+        <input id="{{ node_id }}TelephonyMaxCalls" data-block-config-field="max_calls" data-block-value-type="integer" type="number" min="1" max="8" step="1" value="{{ max_calls }}" />
+        <p class="field-hint">De 1 à 8. Les appels au-delà de cette limite sont ignorés, pas mis en file.</p>
+      </div>
+      <label class="checkbox-line" for="{{ node_id }}TelephonyAnswer">
+        <input id="{{ node_id }}TelephonyAnswer" data-block-config-field="auto_answer" data-block-value-type="boolean" type="checkbox" {{ auto_answer_checked }} />
+        <span>Décrocher automatiquement les appels reconnus</span>
+      </label>
+    </section>
+
+    <section class="ports-editor-section">
+      <div class="ports-editor-header"><span class="group-label">Audio et média</span></div>
+      <label class="checkbox-line" for="{{ node_id }}TelephonyCapture">
+        <input id="{{ node_id }}TelephonyCapture" data-block-config-field="capture_audio" data-block-value-type="boolean" type="checkbox" {{ capture_audio_checked }} />
+        <span>Capturer l'audio de l'appel sur <code>audio_out</code></span>
+      </label>
+      <p class="field-hint">Sans capture, seuls les événements d'appel sont publiés. Avec capture, FFmpeg et un consommateur audio relié à <code>audio_out</code> sont requis.</p>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyMediaHost">Hôte média local</label>
+        <input id="{{ node_id }}TelephonyMediaHost" data-block-config-field="media_host" type="text" autocomplete="off" spellcheck="false" value="{{ media_host }}" />
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyMediaPort">Port média local</label>
+        <input id="{{ node_id }}TelephonyMediaPort" data-block-config-field="media_port" data-block-value-type="integer" type="number" min="0" max="65535" step="1" value="{{ media_port }}" />
+        <p class="field-hint"><code>0</code> laisse le système choisir un port libre à chaque appel.</p>
+      </div>
+      <div class="field-group">
+        <label for="{{ node_id }}TelephonyChunk">Taille de trame encodée (ms)</label>
+        <input id="{{ node_id }}TelephonyChunk" data-block-config-field="ffmpeg_chunk_ms" data-block-value-type="integer" type="number" min="20" max="1000" step="10" value="{{ ffmpeg_chunk_ms }}" />
+        <p class="field-hint">De 20 à 1000 ms. Une valeur basse réduit la latence, une valeur haute réduit le nombre de trames publiées.</p>
+      </div>
+    </section>
+
+    <section class="ports-editor-section">
+      <div class="ports-editor-header"><span class="group-label">Ports et dernier état</span></div>
+      {{ ports_html }}
+      {{ runtime_html }}
+      {{ error_html }}
+      <p class="inspector-copy">Les trois sorties sont fixes. Reliez <code>audio_out</code> et <code>command_out</code> au même consommateur audio pour un enregistrement corrélé.</p>
+    </section>
+  </div>
+
+  <div class="inspector-actions">
+    <span class="field-hint">Les réglages sont enregistrés à l'application et pris en compte au prochain démarrage du Run.</span>
+    <button class="ghost-btn" data-close-block-modal type="button">Annuler</button>
+    <button class="solid-btn" data-block-apply type="button" disabled>Appliquer</button>
+  </div>
 </div>
