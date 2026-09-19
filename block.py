@@ -13,6 +13,7 @@
 # FB6 - Skip unsupported live telephony cleanly in centralized simulation.
 # FB7 - Render block-owned modal, inspector and compact node-card surfaces.
 # FB8 - Support concurrent bounded calls and cooperative listener shutdown.
+# FB9 - Survive ARI disconnections, per-call failures and missed end events.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import random
 import re
 import shutil
 import time
+from urllib.parse import quote
 from typing import Any
 
 from bloxsmith_app.block_api import (
@@ -60,6 +62,11 @@ DEFAULTS = {
     "max_calls": 1,
 }
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+# A gateway runs for days: losing the ARI socket is an incident to recover from,
+# not a reason to stop answering the telephone line.
+RECONNECT_MIN_DELAY = 1.0
+RECONNECT_MAX_DELAY = 30.0
+SESSION_AUDIT_INTERVAL = 15.0
 
 
 class TelephonyInError(RuntimeError):
@@ -211,7 +218,7 @@ def _failure(error: Exception) -> BlockRuntimeResult:
 
 @dataclass
 class _AudioEncoder:
-    """Encode little-endian PCM RTP payloads into compatible Ogg/Opus chunks."""
+    """Encode Asterisk big-endian slin16 RTP payloads into Ogg/Opus chunks."""
 
     chunk_ms: int
     process: asyncio.subprocess.Process
@@ -219,7 +226,7 @@ class _AudioEncoder:
     pending: bytearray = field(default_factory=bytearray)
     output_queue: "asyncio.Queue[bytes | None]" = field(default_factory=asyncio.Queue)
     reader_task: "asyncio.Task[None] | None" = None
-    chunk_size: int = 320  # 10 ms of mono 16 kHz s16le; adjusted on construction.
+    chunk_size: int = 320  # 10 ms of mono 16 kHz s16be; adjusted on construction.
 
     def __post_init__(self) -> None:
         self.chunk_size = max(64, int(32000 * self.chunk_ms / 1000))
@@ -298,6 +305,7 @@ class _MediaSession:
     bridge_id: str | None = None
     external_channel_id: str | None = None
     pump_task: asyncio.Task[None] | None = None
+    cadence_task: asyncio.Task[None] | None = None
     transport: asyncio.DatagramTransport | None = None
     encoder: _AudioEncoder | None = None
     rtp_sequence: int = 0
@@ -306,7 +314,9 @@ class _MediaSession:
     byte_count: int = 0
     rtp_send_sequence: int = 0
     rtp_timestamp: int = 0
-    rtp_ssrc: int = random.getrandbits(32)
+    # A dataclass default is evaluated once at import, which would share one SSRC
+    # between every call of the process; RFC 3550 requires one per stream.
+    rtp_ssrc: int = field(default_factory=lambda: random.getrandbits(32))
     rtp_marker_sent: bool = False
     rtp_remote_addr: tuple | None = None
     rtp_payload_type: int | None = None
@@ -315,14 +325,28 @@ class _MediaSession:
     rtp_packet_count: int = 0
     rtp_received_byte_count: int = 0
     rtp_sent_packet_count: int = 0
+    rtp_dropped_packet_count: int = 0
     command_started: bool = False
     aborted: bool = False
     stopping: bool = False
+
+    async def stop_cadence(self) -> None:
+        """Stop the return-RTP sender before its transport disappears."""
+
+        if self.cadence_task is None:
+            return
+        self.cadence_task.cancel()
+        try:
+            await self.cadence_task
+        except asyncio.CancelledError:
+            pass
+        self.cadence_task = None
 
     async def finish_media(self) -> None:
         """Stop RTP intake, drain encoded frames, and leave exact stop counters."""
 
         self.stopping = True
+        await self.stop_cadence()
         if self.transport is not None:
             self.transport.close()
             self.transport = None
@@ -331,9 +355,14 @@ class _MediaSession:
                 await self.pump_task
             except asyncio.CancelledError:
                 self.aborted = True
+            except Exception:
+                # A broken encoder costs this call its audio, never the whole gateway.
+                self.aborted = True
             self.pump_task = None
 
     async def close(self) -> None:
+        self.stopping = True
+        await self.stop_cadence()
         if self.pump_task is not None:
             self.pump_task.cancel()
             try:
@@ -506,7 +535,18 @@ class TelephonyInBlock(BlockDefinition):
             return _failure(exc)
 
     async def _listen(self, context: BlockRuntimeListenerContext, config_value: dict[str, Any]) -> None:
-        """Own cancellable ARI WebSocket and RTP media IO on the listener thread."""
+        """Keep an ARI session alive until the runtime stops, reconnecting on failure.
+
+        A dropped WebSocket is an ordinary incident for a gateway that runs for days:
+        Asterisk restarts, the network blinks, a keepalive times out. Reporting a failed
+        result would stop the worker for good, so a lost connection is reported as a
+        degraded state and retried with a capped backoff. Only an unrecoverable setup
+        error, raised before the loop, fails the node.
+
+        Args:
+            context: Listener context owning the stop signal, services and result sink.
+            config_value: Validated configuration for this listener.
+        """
 
         try:
             from websockets.asyncio.client import connect
@@ -514,31 +554,194 @@ class TelephonyInBlock(BlockDefinition):
             raise TelephonyInError("Dépendance manquante : websockets==15.0.1.") from exc
         password = _secret(context, config_value["ari_password_ref"])
         client = _AriClient(config_value, password)
-        sessions: dict[str, _MediaSession] = {}
         audio = context.services.get("runtime_audio_streams")
         if not config_value["capture_audio"]:
             audio = None
         if config_value["capture_audio"] and (audio is None or not getattr(audio, "available", False)):
             raise TelephonyInError("Reliez audio_out à un consommateur audio compatible.")
-        websocket_url = client.websocket_url()
-        try:
-            async with connect(websocket_url, additional_headers={"Authorization": client.authorization}, open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
-                context.emit_result(BlockRuntimeResult(last_message="Connecté à Asterisk ARI.", content_type=TEXT_PLAIN,
-                    metadata={"telephony_in": {"state": "connected", "ari_app": config_value["ari_app"]}}))
-                while not context.stop_requested():
-                    try:
-                        raw = await asyncio.wait_for(websocket.recv(), timeout=0.5)
-                    except TimeoutError:
-                        continue
-                    try:
-                        event = json.loads(raw)
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
+        delay = 0.0
+        while not context.stop_requested():
+            sessions: dict[str, _MediaSession] = {}
+            try:
+                await self._ari_session(connect, context, client, config_value, sessions, audio)
+                delay = 0.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                delay = min(RECONNECT_MAX_DELAY, delay * 2 or RECONNECT_MIN_DELAY)
+                detail = str(error) if isinstance(error, TelephonyInError) else "Connexion Asterisk ARI perdue."
+                context.emit_result(BlockRuntimeResult(
+                    last_message=f"{detail} Nouvelle tentative dans {delay:.0f} s.", content_type=TEXT_PLAIN,
+                    metadata={"telephony_in": {"state": "reconnecting", "ari_app": config_value["ari_app"],
+                                               "retry_in_sec": round(delay, 1)}}))
+            finally:
+                await self._release_sessions(context, client, sessions)
+            if delay:
+                await self._wait(context, delay)
+
+    async def _ari_session(self, connect: Any, context: BlockRuntimeListenerContext, client: "_AriClient",
+                           config_value: dict[str, Any], sessions: dict[str, _MediaSession], audio: Any) -> None:
+        """Run one ARI WebSocket session, isolating the failures of a single event.
+
+        Args:
+            connect: WebSocket client factory injected by the caller.
+            context: Listener context receiving connection and call results.
+            client: Authenticated ARI HTTP client.
+            config_value: Validated configuration for this listener.
+            sessions: Live call sessions owned by this connection.
+            audio: Runtime audio stream client, or None when capture is disabled.
+        """
+
+        async with connect(client.websocket_url(), additional_headers={"Authorization": client.authorization},
+                           open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
+            await self._apply_event_filter(client, config_value)
+            context.emit_result(BlockRuntimeResult(last_message="Connecté à Asterisk ARI.", content_type=TEXT_PLAIN,
+                metadata={"telephony_in": {"state": "connected", "ari_app": config_value["ari_app"]}}))
+            audit_deadline = time.monotonic() + SESSION_AUDIT_INTERVAL
+            while not context.stop_requested():
+                try:
+                    raw = await asyncio.wait_for(websocket.recv(), timeout=0.5)
+                except TimeoutError:
+                    audit_deadline = await self._audit_sessions(context, client, sessions, audit_deadline)
+                    continue
+                try:
+                    event = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                try:
                     await self._handle_event(context, client, config_value, sessions, event, audio)
-        finally:
-            for session in list(sessions.values()):
+                except Exception as error:
+                    # One malformed event or one transient ARI error concerns one call;
+                    # the other calls and the connection keep running.
+                    detail = str(error) if isinstance(error, TelephonyInError) else "Erreur de transport Asterisk."
+                    context.emit_result(BlockRuntimeResult(
+                        last_message=f"Événement Asterisk ignoré : {detail}", content_type=TEXT_PLAIN,
+                        metadata={"telephony_in": {"state": "event_error"}}))
+
+    @staticmethod
+    async def _apply_event_filter(client: "_AriClient", config_value: Mapping[str, Any]) -> None:
+        """Ask Asterisk to send only the two event types this block consumes.
+
+        The application is subscribed to its own external media channels, so an
+        unfiltered stream also carries variable, bridge and playback events that are
+        parsed and discarded. The filter is declarative and best effort: a server that
+        refuses it keeps sending everything, which the listener still handles correctly.
+
+        Args:
+            client: Authenticated ARI HTTP client.
+            config_value: Validated configuration naming the Stasis application.
+        """
+
+        try:
+            await client.request(
+                "PUT", f"/applications/{quote(str(config_value['ari_app']), safe='')}/eventFilter",
+                body={"allowed": [{"type": "StasisStart"}, {"type": "StasisEnd"}]},
+            )
+        except Exception:
+            return
+
+    async def _audit_sessions(self, context: BlockRuntimeListenerContext, client: "_AriClient",
+                              sessions: dict[str, _MediaSession], deadline: float) -> float:
+        """Close calls whose Asterisk channel is gone, and return the next audit deadline.
+
+        A ``StasisEnd`` lost during a disconnection would otherwise keep a session, its
+        encoder and its slot in ``max_calls`` forever. Ambiguity is never resolved by
+        closing: an unreadable channel list leaves every session untouched.
+
+        Args:
+            context: Listener context receiving the recovered end events.
+            client: Authenticated ARI HTTP client.
+            sessions: Live call sessions owned by this connection.
+            deadline: Monotonic instant from which an audit is due.
+
+        Returns:
+            The monotonic instant of the next audit.
+        """
+
+        if not sessions or time.monotonic() < deadline:
+            return deadline
+        try:
+            channels = await client.request("GET", "/channels")
+        except Exception:
+            return time.monotonic() + SESSION_AUDIT_INTERVAL
+        if not isinstance(channels, list):
+            return time.monotonic() + SESSION_AUDIT_INTERVAL
+        live = {str(item.get("id") or "") for item in channels if isinstance(item, Mapping)}
+        for channel_id in [key for key in sessions if key not in live]:
+            session = sessions.pop(channel_id)
+            await self._close_call(context, client, session, {"id": channel_id}, recovered=True)
+        return time.monotonic() + SESSION_AUDIT_INTERVAL
+
+    async def _close_call(self, context: BlockRuntimeListenerContext, client: "_AriClient",
+                          session: _MediaSession, channel: Mapping[str, Any], **extra: Any) -> None:
+        """Drain media, publish the stop command and the end event, then release Asterisk.
+
+        The graph is served before Asterisk: a cleanup error must never cost the audio
+        consumer its stop command or its exact published counters.
+
+        Args:
+            context: Listener context receiving the correlated results.
+            client: Authenticated ARI HTTP client.
+            session: Call session being closed.
+            channel: Channel object used to describe the ended call.
+            extra: Additional fields merged into the end event.
+        """
+
+        await session.finish_media()
+        if session.command_started:
+            context.emit_result(self._command_result({
+                "action": "stop", "stream_id": session.call_id,
+                "frame_count": session.frame_count, "byte_count": session.byte_count,
+                "aborted": session.aborted,
+            }))
+        context.emit_result(self._call_result(_event(
+            "call.ended", channel, call_id=session.call_id,
+            rtp_packets=session.rtp_packet_count,
+            rtp_bytes=session.rtp_received_byte_count,
+            rtp_return_packets=session.rtp_sent_packet_count,
+            rtp_dropped=session.rtp_dropped_packet_count,
+            **extra,
+        )))
+        await self._release_call(client, session)
+
+    @staticmethod
+    async def _release_call(client: "_AriClient", session: _MediaSession, *, hangup: bool = False) -> None:
+        """Release the local and Asterisk resources of one call without ever raising.
+
+        Args:
+            client: Authenticated ARI HTTP client.
+            session: Call session to release.
+            hangup: Whether the caller channel must be hung up too.
+        """
+
+        await session.close()
+        targets = []
+        if hangup and session.channel_id:
+            targets.append(f"/channels/{session.channel_id}")
+        if session.bridge_id:
+            targets.append(f"/bridges/{session.bridge_id}")
+        if session.external_channel_id:
+            targets.append(f"/channels/{session.external_channel_id}")
+        for path in targets:
+            try:
+                await client.request("DELETE", path, quiet=True)
+            except Exception:
+                continue
+
+    async def _release_sessions(self, context: BlockRuntimeListenerContext, client: "_AriClient",
+                                sessions: dict[str, _MediaSession]) -> None:
+        """Abort the calls of a finished ARI session, reporting an aborted stop command.
+
+        Args:
+            context: Listener context receiving the aborted stop commands.
+            client: Authenticated ARI HTTP client.
+            sessions: Sessions of the connection being abandoned.
+        """
+
+        for session in list(sessions.values()):
+            try:
                 if session.command_started:
                     session.aborted = True
                     await session.finish_media()
@@ -547,12 +750,26 @@ class TelephonyInBlock(BlockDefinition):
                         "frame_count": session.frame_count, "byte_count": session.byte_count,
                         "aborted": True,
                     }))
-                await session.close()
-                if session.bridge_id:
-                    await client.request("DELETE", f"/bridges/{session.bridge_id}", quiet=True)
-                if session.external_channel_id:
-                    await client.request("DELETE", f"/channels/{session.external_channel_id}", quiet=True)
-            sessions.clear()
+            except Exception:
+                pass
+            await self._release_call(client, session)
+        sessions.clear()
+
+    @staticmethod
+    async def _wait(context: BlockRuntimeListenerContext, delay: float) -> None:
+        """Wait for a retry delay in short steps so a stop request stays immediate.
+
+        Args:
+            context: Listener context exposing the stop signal.
+            delay: Requested delay in seconds.
+        """
+
+        deadline = time.monotonic() + delay
+        while not context.stop_requested():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.1, remaining))
 
     async def _handle_event(self, context: BlockRuntimeListenerContext, client: "_AriClient",
                             config_value: dict[str, Any], sessions: dict[str, _MediaSession], event: Mapping[str, Any], audio: Any) -> None:
@@ -562,6 +779,8 @@ class TelephonyInBlock(BlockDefinition):
         raw_channel = event.get("channel")
         channel = raw_channel if isinstance(raw_channel, Mapping) else {}
         channel_id = str(channel.get("id") or "")
+        if self._is_media_channel(channel, sessions):
+            return
         if event_type == "StasisStart" and channel_id and channel_id not in sessions:
             if not self._matches(channel, config_value) or len(sessions) >= config_value["max_calls"]:
                 return
@@ -569,46 +788,56 @@ class TelephonyInBlock(BlockDefinition):
             session = _MediaSession(call_id=call_id, channel_id=channel_id)
             sessions[channel_id] = session
             context.emit_result(self._call_result(_event("call.incoming", channel, call_id=call_id, audio=config_value["capture_audio"])))
-            if config_value["auto_answer"]:
-                await client.request("POST", f"/channels/{channel_id}/answer")
-            if config_value["capture_audio"]:
-                try:
+            reason = "answer"
+            try:
+                if config_value["auto_answer"]:
+                    await client.request("POST", f"/channels/{channel_id}/answer")
+                if config_value["capture_audio"]:
+                    reason = "media_setup"
                     await self._start_media(client, config_value, session, audio)
                     session.command_started = True
                     context.emit_result(self._command_result({
                         "action": "start", "stream_id": session.call_id,
                     }))
-                except Exception:
-                    await session.close()
-                    if session.bridge_id:
-                        await client.request("DELETE", f"/bridges/{session.bridge_id}", quiet=True)
-                    if session.external_channel_id:
-                        await client.request("DELETE", f"/channels/{session.external_channel_id}", quiet=True)
-                    sessions.pop(channel_id, None)
-                    context.emit_result(self._call_result(_event(
-                        "call.failed", channel, call_id=call_id, audio=False, reason="media_setup"
-                    )))
-                    context.emit_result(_failure(TelephonyInError("Initialisation média Asterisk impossible.")))
+            except Exception as error:
+                sessions.pop(channel_id, None)
+                # An answered caller left in Stasis would hold an Asterisk channel and
+                # hear silence until it gives up, so the failed call is hung up.
+                await self._release_call(client, session, hangup=config_value["auto_answer"])
+                context.emit_result(self._call_result(_event(
+                    "call.failed", channel, call_id=call_id, audio=False, reason=reason
+                )))
+                detail = str(error) if isinstance(error, TelephonyInError) else "Erreur de transport Asterisk."
+                # A failed call is reported as a call event, not as a failed node result:
+                # the framework stops the worker on the first failed listener result.
+                context.emit_result(BlockRuntimeResult(
+                    last_message=f"Appel {call_id} abandonné : {detail}", content_type=TEXT_PLAIN,
+                    metadata={"telephony_in": {"state": "call_failed", "reason": reason}}))
             return
         if event_type == "StasisEnd" and channel_id in sessions:
-            session = sessions.pop(channel_id)
-            await session.finish_media()
-            if session.bridge_id:
-                await client.request("DELETE", f"/bridges/{session.bridge_id}", quiet=True)
-            if session.external_channel_id:
-                await client.request("DELETE", f"/channels/{session.external_channel_id}", quiet=True)
-            if session.command_started:
-                context.emit_result(self._command_result({
-                    "action": "stop", "stream_id": session.call_id,
-                    "frame_count": session.frame_count, "byte_count": session.byte_count,
-                    "aborted": session.aborted,
-                }))
-            context.emit_result(self._call_result(_event(
-                "call.ended", channel, call_id=session.call_id,
-                rtp_packets=session.rtp_packet_count,
-                rtp_bytes=session.rtp_received_byte_count,
-                rtp_return_packets=session.rtp_sent_packet_count,
-            )))
+            await self._close_call(context, client, sessions.pop(channel_id), channel)
+
+    @staticmethod
+    def _is_media_channel(channel: Mapping[str, Any], sessions: Mapping[str, "_MediaSession"]) -> bool:
+        """Return whether an event describes one of the block's own media channels.
+
+        External media channels join the same Stasis application, so Asterisk announces
+        them exactly like an inbound call. Without this guard they are answered as new
+        calls as soon as ``max_calls`` allows a second session, each one creating another
+        media channel. Their identifier can still be unknown when the event arrives, so
+        the channel name is checked first.
+
+        Args:
+            channel: Channel object carried by the ARI event.
+            sessions: Active sessions, keyed by caller channel identifier.
+        """
+
+        if str(channel.get("name") or "").startswith("UnicastRTP/"):
+            return True
+        channel_id = str(channel.get("id") or "")
+        return bool(channel_id) and any(
+            session.external_channel_id == channel_id for session in sessions.values()
+        )
 
     @staticmethod
     def _matches(channel: Mapping[str, Any], config_value: Mapping[str, Any]) -> bool:
@@ -632,8 +861,12 @@ class TelephonyInBlock(BlockDefinition):
                 payload = _rtp_payload(data)
                 payload_type = data[1] & 0x7f
                 if payload is not None:
-                    try: queue.put_nowait((addr, payload_type, payload))
-                    except asyncio.QueueFull: pass
+                    try:
+                        queue.put_nowait((addr, payload_type, payload))
+                    except asyncio.QueueFull:
+                        # Silent audio loss is the worst case for a recording or a
+                        # transcription: count it and report it on call.ended.
+                        session.rtp_dropped_packet_count += 1
 
         transport, _ = await loop.create_datagram_endpoint(_Protocol, local_addr=(config_value["media_host"], int(config_value["media_port"])))
         sock = transport.get_extra_info("socket")
@@ -649,10 +882,15 @@ class TelephonyInBlock(BlockDefinition):
         asterisk_port = int(external_vars.get("UNICASTRTP_LOCAL_PORT") or 0)
         if asterisk_host and asterisk_port > 0:
             # Start return media immediately instead of waiting for the first inbound RTP packet.
-            # Asterisk 20 uses dynamic payload type 118 for slin16 (640 bytes / 20 ms).
+            # The Asterisk RTP engine fixes payload type 118 for slin16, whose 20 ms frame is
+            # 640 bytes at 16 kHz. Inbound RTP refines both values if this endpoint differs.
             session.rtp_remote_addr = (asterisk_host, asterisk_port)
             session.rtp_payload_type = 118
             session.rtp_payload_size = 640
+        # One dedicated sender owns the 20 ms return cadence. Deriving it from inbound
+        # packets starves it exactly while the caller speaks, which is when Asterisk and
+        # the SIP provider watch for return media before dropping the call.
+        session.cadence_task = asyncio.create_task(self._return_rtp_cadence(session))
         bridge = await client.request("POST", "/bridges", data={"type": "mixing"})
         session.bridge_id = str(bridge.get("id") or "")
         await client.request("POST", f"/bridges/{session.bridge_id}/addChannel", data={"channel": f"{session.channel_id},{session.external_channel_id}"})
@@ -696,28 +934,57 @@ class TelephonyInBlock(BlockDefinition):
         session.rtp_last_send = time.monotonic()
 
     @staticmethod
+    async def _return_rtp_cadence(session: "_MediaSession", interval: float = 0.02) -> None:
+        """Send one return RTP packet every ``interval`` seconds for the whole call.
+
+        The cadence is independent of the inbound flow: it starts as soon as the
+        external-media address is known and keeps running while the caller speaks.
+
+        Args:
+            session: Media session owning the RTP transport and its negotiation state.
+            interval: Packet period, one 20 ms slin16 frame by default.
+        """
+
+        deadline = time.monotonic()
+        while not session.stopping:
+            if (session.transport is not None and session.rtp_remote_addr is not None
+                    and session.rtp_payload_type is not None and session.rtp_payload_size):
+                TelephonyInBlock._send_rtp_silence(
+                    session, session.rtp_remote_addr, session.rtp_payload_type, session.rtp_payload_size
+                )
+            deadline += interval
+            delay = deadline - time.monotonic()
+            if delay < -interval:
+                # After a long stall, resume from now instead of catching up in a burst.
+                deadline, delay = time.monotonic(), 0.0
+            await asyncio.sleep(max(0.0, delay))
+
+    @staticmethod
     async def _pump_media(session: "_MediaSession", encoder: "_AudioEncoder",
                           queue: "asyncio.Queue[tuple[tuple, int, bytes]]", audio: Any) -> None:
-        """Convert RTP input, return silence to Asterisk, and publish encoded frames."""
+        """Convert inbound RTP into Opus frames and publish them on the audio port."""
 
+        encoder_failed = False
         while not session.stopping:
             try:
                 remote_addr, payload_type, payload = await asyncio.wait_for(queue.get(), timeout=0.02)
             except asyncio.TimeoutError:
-                if (session.rtp_remote_addr is not None and session.rtp_payload_type is not None and
-                        session.rtp_payload_size is not None and
-                        time.monotonic() - session.rtp_last_send >= 0.02):
-                    TelephonyInBlock._send_rtp_silence(
-                        session, session.rtp_remote_addr, session.rtp_payload_type, session.rtp_payload_size
-                    )
+                # Return RTP belongs to the cadence task; this timeout only lets the loop
+                # observe that the session is stopping.
                 continue
             session.rtp_packet_count += 1
             session.rtp_received_byte_count += len(payload)
             session.rtp_remote_addr = remote_addr
             session.rtp_payload_type = payload_type
             session.rtp_payload_size = len(payload)
-            # Inbound packets refresh negotiation; one monotonic 20 ms sender owns the return cadence.
-            chunks = await encoder.feed(payload)
+            # Inbound packets only refresh the negotiated address, payload type and frame
+            # size; the cadence task picks them up for its next packet.
+            try:
+                chunks = await encoder.feed(payload)
+            except Exception:
+                # FFmpeg died mid-call: stop this capture and let the call go on.
+                session.aborted, encoder_failed = True, True
+                break
             if audio is not None:
                 for chunk in chunks:
                     session.frame_sequence += 1
@@ -727,7 +994,7 @@ class TelephonyInBlock(BlockDefinition):
                                        stream_id=session.call_id, sequence=session.frame_sequence)
         final_chunks: list[bytes] = []
         try:
-            final_chunks = await encoder.close()
+            final_chunks = [] if encoder_failed else await encoder.close()
         except Exception:
             session.aborted = True
         if audio is not None:
@@ -793,16 +1060,30 @@ class _AriClient:
         return self.config_value["ari_base_url"].replace("http://", "ws://", 1).replace("https://", "wss://", 1) + \
             f"/ari/events?app={self.config_value['ari_app']}"
 
-    async def request(self, method: str, path: str, data: Mapping[str, Any] | None = None, *, quiet: bool = False) -> dict[str, Any]:
-        """Perform one bounded ARI request and return its JSON object."""
+    async def request(self, method: str, path: str, data: Mapping[str, Any] | None = None, *,
+                      body: Mapping[str, Any] | None = None, quiet: bool = False) -> dict[str, Any]:
+        """Perform one bounded ARI request and return its JSON object.
+
+        Args:
+            method: HTTP method.
+            path: ARI path below ``/ari``.
+            data: Query parameters, which is how ARI takes most of its arguments.
+            body: JSON body, required by the few resources that read one.
+            quiet: Whether a missing or conflicting resource is an acceptable answer.
+        """
 
         def call() -> dict[str, Any]:
             from urllib.error import HTTPError
             from urllib.parse import urlencode
             from urllib.request import Request, urlopen
             suffix = f"?{urlencode(data)}" if data else ""
+            headers = {"Authorization": self.authorization, "Accept": "application/json"}
+            payload = None
+            if body is not None:
+                payload = json.dumps(body).encode("utf-8")
+                headers["Content-Type"] = "application/json"
             request = Request(self.config_value["ari_base_url"] + "/ari" + path + suffix, method=method,
-                              headers={"Authorization": self.authorization, "Accept": "application/json"})
+                              data=payload, headers=headers)
             try:
                 with urlopen(request, timeout=5) as response:
                     body = response.read()

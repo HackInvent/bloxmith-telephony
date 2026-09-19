@@ -221,7 +221,7 @@ class AsyncRequestRecorder:
 
 
 def test_media_setup_failure_releases_transport():
-    """FB5/FB8: failed Asterisk media setup closes local IO and emits call.failed."""
+    """FB5/FB9: a failed media setup closes local IO, reports call.failed and keeps running."""
     from blocs.telephony_in.block import _MediaSession, TelephonyInError
 
     class FailingClient(AsyncRequestRecorder):
@@ -252,7 +252,10 @@ def test_media_setup_failure_releases_transport():
         events = [json.loads(result.outputs[0].value) for result in emitted if result.outputs]
         assert [event["event"] for event in events] == ["call.incoming", "call.failed"]
         assert events[-1]["reason"] == "media_setup" and events[-1]["audio"] is False
-        assert emitted[-1].status == "failed" and "média" in emitted[-1].error
+        # The framework stops the worker on the first failed listener result, so one
+        # broken call must be reported as a call event and a degraded state instead.
+        assert all(result.status != "failed" for result in emitted), "One call must not fail the node"
+        assert emitted[-1].metadata["telephony_in"]["state"] == "call_failed"
 
     asyncio.run(scenario())
 
@@ -569,6 +572,334 @@ def test_proactive_rtp_before_inbound_media():
     asyncio.run(scenario())
 
 
+def test_return_rtp_cadence_survives_inbound_audio():
+    """FB5: the return cadence keeps its own pace while Asterisk sends call audio."""
+    from blocs.telephony_in.block import _MediaSession
+
+    async def scenario():
+        socket = __import__("socket")
+        client = AsyncRequestRecorder()
+        audio = FakeAudioClient()
+        block = TelephonyInBlock()
+        settings = config({**DEFAULTS, "ari_password_ref": REF})
+        session = _MediaSession(call_id="call-cadence", channel_id="caller-cadence")
+        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        original = module._AudioEncoder
+        module._AudioEncoder = FakeEncoder
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as asterisk_media:
+            asterisk_media.bind(("127.0.0.1", 0))
+            asterisk_media.setblocking(False)
+            host, port = asterisk_media.getsockname()
+            client.responses = [{
+                "id": "external-cadence",
+                "channelvars": {"UNICASTRTP_LOCAL_ADDRESS": host, "UNICASTRTP_LOCAL_PORT": str(port)},
+            }, {"id": "bridge-cadence"}]
+            try:
+                await block._start_media(client, settings, session, audio)
+                inbound_addr = session.transport.get_extra_info("socket").getsockname()
+                # One 20 ms slin16 frame, delivered far faster than the 20 ms return period so
+                # the media pump never observes an idle queue.
+                frame = bytes((0x80, 118, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1)) + bytes(640)
+                returned, deadline = 0, time.monotonic() + 0.3
+                while time.monotonic() < deadline:
+                    # Asterisk sends and receives on one socket; the block answers the
+                    # address it observes, so the test must use symmetric RTP too.
+                    asterisk_media.sendto(frame, inbound_addr)
+                    await asyncio.sleep(0.001)
+                    while True:
+                        try:
+                            asterisk_media.recv(65536)
+                        except BlockingIOError:
+                            break
+                        returned += 1
+                assert session.rtp_packet_count > 0, "Inbound call audio must still reach the pump"
+                assert audio.publications, "Inbound call audio must still be published"
+                assert returned >= 8, f"Return RTP stalled under inbound audio: {returned} packets"
+            finally:
+                module._AudioEncoder = original
+                await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_external_media_channel_is_not_taken_for_a_call():
+    """FB1/FB8: the block never answers its own external media channels as new calls."""
+    from blocs.telephony_in.block import _MediaSession
+
+    block = TelephonyInBlock()
+    client = AsyncRequestRecorder()
+    emitted = []
+    context = SimpleNamespace(emit_result=emitted.append)
+    # A second allowed call is what exposes the loop: the media channel of the first one
+    # joins the same Stasis application and is announced exactly like an inbound call.
+    settings = config({**DEFAULTS, "ari_password_ref": REF, "max_calls": 2, "capture_audio": False})
+    sessions = {"caller-1": _MediaSession(call_id="ari-caller-1", channel_id="caller-1",
+                                          external_channel_id="external-1")}
+    for channel in ({"id": "external-1", "name": "Announcer/ARI"},
+                    {"id": "not-yet-known", "name": "UnicastRTP/127.0.0.1:41000-00000002"}):
+        asyncio.run(block._handle_event(context, client, settings, sessions, {
+            "type": "StasisStart", "channel": channel,
+        }, None))
+    assert set(sessions) == {"caller-1"}, "A media channel must not open a call session"
+    assert not emitted, "A media channel must not emit a call event"
+    assert not client.requests, "A media channel must never be answered"
+
+    # A real caller is still accepted while that first session is active.
+    asyncio.run(block._handle_event(context, client, settings, sessions, {
+        "type": "StasisStart", "channel": {"id": "caller-2", "name": "PJSIP/ovh-2"},
+    }, None))
+    assert set(sessions) == {"caller-1", "caller-2"}, "A second real call must still be accepted"
+    assert json.loads(emitted[0].outputs[0].value)["channel_id"] == "caller-2"
+
+
+def test_sessions_use_distinct_ssrc():
+    """FB5: every call owns its RTP synchronization source, as RFC 3550 requires."""
+    from blocs.telephony_in.block import _MediaSession
+
+    sources = {_MediaSession(call_id=f"call-{index}", channel_id=f"chan-{index}").rtp_ssrc
+               for index in range(5)}
+    assert len(sources) == 5, "Concurrent calls must not share one SSRC"
+
+
+class FakeWebSocket:
+    """Deliver scripted ARI frames, then raise or idle like a real connection."""
+
+    def __init__(self, frames, error=None):
+        self.frames = list(frames)
+        self.error = error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def recv(self):
+        if self.frames:
+            return self.frames.pop(0)
+        if self.error is not None:
+            raise self.error
+        await asyncio.sleep(0.05)
+        raise TimeoutError
+
+
+def listener_context(stop_after=2, services=None):
+    """Build a listener context that stops after a bounded number of stop checks."""
+    state = {"checks": 0}
+    emitted = []
+
+    def stop_requested():
+        state["checks"] += 1
+        return state["checks"] > stop_after
+
+    return SimpleNamespace(emit_result=emitted.append, stop_requested=stop_requested,
+                           services=services or {"resolve_secret": lambda ref: "ari-secret"}), emitted
+
+
+def test_listener_reconnects_after_a_dropped_connection():
+    """FB9: a lost ARI connection is retried instead of stopping the worker."""
+    import websockets.asyncio.client as ws_client
+
+    block = TelephonyInBlock()
+    settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": False})
+    context, emitted = listener_context(stop_after=400)
+    attempts = []
+
+    def fake_connect(url, **kwargs):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise OSError("connection reset by peer")
+        if len(attempts) == 2:
+            return FakeWebSocket([], error=OSError("connection closed"))
+        context.stop_requested = lambda: True
+        return FakeWebSocket([])
+
+    original, module = ws_client.connect, __import__("blocs.telephony_in.block", fromlist=["block"])
+    ws_client.connect = fake_connect
+    module.RECONNECT_MIN_DELAY = 0.01
+    module.RECONNECT_MAX_DELAY = 0.02
+    try:
+        asyncio.run(block._listen(context, settings))
+    finally:
+        ws_client.connect = original
+        module.RECONNECT_MIN_DELAY, module.RECONNECT_MAX_DELAY = 1.0, 30.0
+
+    assert len(attempts) >= 3, "The listener must keep retrying after a dropped connection"
+    states = [result.metadata["telephony_in"]["state"] for result in emitted]
+    assert "reconnecting" in states and states.count("connected") >= 1
+    assert all(result.status != "failed" for result in emitted), \
+        "A reconnection must not report a failed result, which would stop the worker"
+
+
+def test_transient_answer_failure_releases_the_caller():
+    """FB9: an ARI error while answering fails one call and hangs up its channel."""
+    from blocs.telephony_in.block import TelephonyInError
+
+    class AnswerFailure(AsyncRequestRecorder):
+        async def request(self, *args, **kwargs):
+            self.requests.append((args, kwargs))
+            if args and args[1].endswith("/answer"):
+                raise TelephonyInError("Asterisk ARI est injoignable.")
+            return {}
+
+    block = TelephonyInBlock()
+    client = AnswerFailure()
+    emitted = []
+    context = SimpleNamespace(emit_result=emitted.append)
+    settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": False, "auto_answer": True})
+    sessions = {}
+    asyncio.run(block._handle_event(context, client, settings, sessions, {
+        "type": "StasisStart", "channel": {"id": "answer-fail", "caller": {}, "dialplan": {}},
+    }, None))
+
+    assert not sessions, "A call that cannot be answered must not stay active"
+    events = [json.loads(result.outputs[0].value) for result in emitted if result.outputs]
+    assert [event["event"] for event in events] == ["call.incoming", "call.failed"]
+    assert events[-1]["reason"] == "answer"
+    assert ("DELETE", "/channels/answer-fail") in [args[:2] for args, _ in client.requests], \
+        "The answered caller must be hung up instead of being left in silence"
+    assert all(result.status != "failed" for result in emitted)
+
+
+def test_stop_command_survives_a_cleanup_failure():
+    """FB9: the audio consumer gets its stop command even if Asterisk cleanup fails."""
+    from blocs.telephony_in.block import _MediaSession, TelephonyInError
+
+    class CleanupFailure(AsyncRequestRecorder):
+        async def request(self, *args, **kwargs):
+            self.requests.append((args, kwargs))
+            if args and args[0] == "DELETE":
+                raise TelephonyInError("Asterisk ARI est injoignable.")
+            return {}
+
+    block = TelephonyInBlock()
+    emitted = []
+    context = SimpleNamespace(emit_result=emitted.append)
+    session = _MediaSession(call_id="ari-cleanup", channel_id="cleanup-call",
+                            bridge_id="bridge-cleanup", external_channel_id="external-cleanup")
+    session.command_started, session.frame_count, session.byte_count = True, 3, 120
+    sessions = {"cleanup-call": session}
+    settings = config({**DEFAULTS, "ari_password_ref": REF})
+    asyncio.run(block._handle_event(context, CleanupFailure(), settings, sessions, {
+        "type": "StasisEnd", "channel": {"id": "cleanup-call", "caller": {}, "dialplan": {}},
+    }, None))
+
+    payloads = [json.loads(result.outputs[0].value) for result in emitted if result.outputs]
+    assert payloads[0] == {"action": "stop", "stream_id": "ari-cleanup", "frame_count": 3,
+                           "byte_count": 120, "aborted": False}
+    assert payloads[1]["event"] == "call.ended", "The end event must follow the stop command"
+    assert not sessions
+
+
+def test_missed_end_event_is_recovered_by_the_audit():
+    """FB9: a call whose Asterisk channel disappeared is closed instead of leaking."""
+    from blocs.telephony_in.block import _MediaSession
+
+    class ChannelList(AsyncRequestRecorder):
+        def __init__(self, channels):
+            super().__init__()
+            self.channels = channels
+
+        async def request(self, *args, **kwargs):
+            self.requests.append((args, kwargs))
+            return self.channels if args and args[0] == "GET" else {}
+
+    block = TelephonyInBlock()
+    emitted = []
+    context = SimpleNamespace(emit_result=emitted.append)
+    session = _MediaSession(call_id="ari-ghost", channel_id="ghost-call")
+    session.rtp_dropped_packet_count = 4
+
+    # An unreadable channel list must never be read as "every call ended".
+    sessions = {"ghost-call": session}
+    asyncio.run(block._audit_sessions(context, ChannelList({}), sessions, 0.0))
+    assert sessions, "An ambiguous audit must leave live calls untouched"
+    assert not emitted
+
+    asyncio.run(block._audit_sessions(context, ChannelList([{"id": "other-call"}]), sessions, 0.0))
+    assert not sessions, "A call whose channel is gone must be closed"
+    ended = json.loads(emitted[-1].outputs[0].value)
+    assert ended["event"] == "call.ended" and ended["recovered"] is True
+    assert ended["rtp_dropped"] == 4, "Dropped inbound packets must be reported, not silent"
+
+
+def test_encoder_failure_keeps_the_call_alive():
+    """FB9: a dead encoder aborts one capture without tearing down the session."""
+    from blocs.telephony_in.block import _MediaSession
+
+    class BrokenEncoder(FakeEncoder):
+        async def feed(self, payload):
+            raise BrokenPipeError("ffmpeg died")
+
+        async def close(self):
+            raise BrokenPipeError("ffmpeg died")
+
+    async def scenario():
+        audio = FakeAudioClient()
+        session = _MediaSession(call_id="ari-broken", channel_id="broken-call")
+        queue = asyncio.Queue(maxsize=4)
+        await queue.put((("127.0.0.1", 4000), 118, b"pcm"))
+        pump = asyncio.create_task(TelephonyInBlock._pump_media(session, BrokenEncoder(), queue, audio))
+        await until_async(lambda: session.aborted, "The capture must report itself aborted")
+        session.stopping = True
+        await asyncio.wait_for(pump, timeout=2)
+        assert session.aborted and not audio.publications
+
+    asyncio.run(scenario())
+
+
+async def until_async(predicate, message, timeout=2):
+    """Await an in-process condition with an explicit deadline."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(message)
+
+
+def test_event_filter_is_declared_and_optional():
+    """FB9: the app subscribes to the two event types it uses, and tolerates a refusal."""
+    import websockets.asyncio.client as ws_client
+    from blocs.telephony_in.block import TelephonyInError
+
+    class Refusing(AsyncRequestRecorder):
+        async def request(self, *args, **kwargs):
+            self.requests.append((args, kwargs))
+            raise TelephonyInError("Asterisk ARI a refusé la requête (404).")
+
+    block = TelephonyInBlock()
+    settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": False, "ari_app": "bloxsmith"})
+
+    def as_ari(recorder):
+        recorder.websocket_url = lambda: "ws://127.0.0.1:8088/ari/events?app=bloxsmith"
+        recorder.authorization = "Basic test"
+        return recorder
+
+    for client in (as_ari(AsyncRequestRecorder()), as_ari(Refusing())):
+        context, emitted = listener_context(stop_after=400)
+        context.stop_requested = lambda: False
+        websocket = FakeWebSocket([], error=OSError("closed"))
+
+        def fake_connect(url, **kwargs):
+            return websocket
+
+        original = ws_client.connect
+        ws_client.connect = fake_connect
+        try:
+            asyncio.run(block._ari_session(fake_connect, context, client, settings, {}, None))
+        except OSError:
+            pass
+        finally:
+            ws_client.connect = original
+
+        args, kwargs = client.requests[0]
+        assert args == ("PUT", "/applications/bloxsmith/eventFilter"), args
+        assert kwargs["body"] == {"allowed": [{"type": "StasisStart"}, {"type": "StasisEnd"}]}
+        # A server that refuses the filter keeps sending everything; the session goes on.
+        assert emitted and emitted[0].metadata["telephony_in"]["state"] == "connected"
+
+
 def main():
     test_contract_config_ports_ui()
     test_ui_surfaces_expose_every_setting()
@@ -577,6 +908,15 @@ def main():
     test_correlated_audio_commands()
     test_audio_media_attach_publish_and_release()
     test_proactive_rtp_before_inbound_media()
+    test_return_rtp_cadence_survives_inbound_audio()
+    test_external_media_channel_is_not_taken_for_a_call()
+    test_sessions_use_distinct_ssrc()
+    test_listener_reconnects_after_a_dropped_connection()
+    test_transient_answer_failure_releases_the_caller()
+    test_stop_command_survives_a_cleanup_failure()
+    test_missed_end_event_is_recovered_by_the_audit()
+    test_encoder_failure_keeps_the_call_alive()
+    test_event_filter_is_declared_and_optional()
     test_rtp_payload_skips_extension_header()
     test_media_setup_failure_releases_transport()
     test_real_opus_encoder()

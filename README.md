@@ -8,6 +8,9 @@
 Verified BloxSmith versions: **1.0.9** (bundled-block tests; see [test evidence](compatibility.json)).
 <!-- block-metadata:end -->
 
+[![Asterisk: tested 20.6.0](https://img.shields.io/badge/Asterisk-tested%2020.6.0-orange)](#asterisk-compatibility)
+[![Asterisk: requires 16.6+](https://img.shields.io/badge/Asterisk-requires%2016.6%2B-lightgrey)](#asterisk-compatibility)
+
 Receive inbound telephone calls from an OVHcloud SIP line through an existing local Asterisk server and expose them to a BloxSmith blueprint as normalized call events and runtime audio.
 
 ## Role
@@ -43,7 +46,7 @@ Message output with `application/json`. Events use a provider-neutral shape:
 }
 ```
 
-`event` is `call.incoming`, `call.ended`, or `call.failed` (with `reason=media_setup` when Asterisk media attachment fails). With capture enabled, `call.ended` also reports diagnostic RTP counters: `rtp_packets`, `rtp_bytes`, and `rtp_return_packets`.
+`event` is `call.incoming`, `call.ended`, or `call.failed`. A failed call carries `reason=answer` when Asterisk refuses to answer it and `reason=media_setup` when media attachment fails; in both cases the call is released and the other calls keep running. With capture enabled, `call.ended` reports diagnostic RTP counters: `rtp_packets`, `rtp_bytes`, `rtp_return_packets`, and `rtp_dropped` for inbound packets discarded under load. A call closed by the periodic audit rather than by `StasisEnd` also carries `recovered=true`.
 
 ```json
 {
@@ -52,7 +55,8 @@ Message output with `application/json`. Events use a provider-neutral shape:
   "call_id": "ari-channel-id",
   "rtp_packets": 500,
   "rtp_bytes": 320000,
-  "rtp_return_packets": 500
+  "rtp_return_packets": 500,
+  "rtp_dropped": 0
 }
 ```
 
@@ -118,7 +122,25 @@ Release assets declared in `model.json.ui_assets` are scoped to `telephony_in@<v
 
 ### Active Runtime (`zeromq_active`)
 
-After Run, the persistent listener connects to Asterisk ARI. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, plays Asterisk's built-in one-second silence prompt to open the PJSIP/RTP path, uses Asterisk's `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT` to start standards-compliant 20 ms RTP silence immediately, receives RTP, transcodes Asterisk's big-endian `slin16` PCM to Opus/Ogg, and publishes frames through `audio_out`. The playback is inaudible; it forces real media through NAT until the block's return RTP takes over. The payload type and frame size are refined from inbound RTP when it arrives. `StasisEnd` releases media and emits `call.ended`. A media setup failure releases the local transport and emits `call.failed` before a redacted runtime error.
+After Run, the persistent listener connects to Asterisk ARI and declares an event filter so the application only receives `StasisStart` and `StasisEnd`. The filter is best effort: an Asterisk that refuses it keeps sending every event, which the listener still handles. Matching calls emit `call.incoming`. With capture enabled, the block answers the call, creates an external media channel and mixing bridge, and plays Asterisk's built-in one-second silence prompt to open the PJSIP/RTP path. The playback is inaudible; it forces real media through NAT until the block's return RTP takes over.
+
+A dedicated sender then returns standards-compliant 20 ms RTP for the whole call, at its own pace and independently of the inbound flow, so the return path never stalls while the caller speaks. It starts from Asterisk's `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT`, then follows the source address, payload type and frame size observed on inbound RTP, as symmetric RTP requires. Each call owns its RTP synchronization source.
+
+Inbound RTP is transcoded from Asterisk's big-endian `slin16` PCM to Opus/Ogg and published through `audio_out`. External media channels join the same Stasis application, so Asterisk announces them like inbound calls; the block recognizes its own and ignores them, and `max_calls` therefore counts real callers only. `StasisEnd` drains the capture, publishes the correlated stop command and `call.ended`, and only then releases the Asterisk resources: a cleanup error never costs the audio consumer its stop command or its exact counters.
+
+### Failure handling
+
+The gateway is built to stay up. A lost ARI connection is not a node failure: the listener reports a
+`reconnecting` state and retries with a capped backoff, from one second up to thirty, until the runtime is
+stopped. Only an unrecoverable setup error, such as an unreachable vault or a missing dependency, fails the
+block. A single call that cannot be answered or captured is released, reported as `call.failed`, and hung up
+so it does not hold an Asterisk channel while the caller hears silence. A broken encoder aborts that call's
+capture and leaves the session and its events intact.
+
+Every fifteen seconds, calls whose Asterisk channel has disappeared are closed and reported with
+`recovered=true`. Without this audit, an end event lost during a disconnection would keep a session, its
+encoder and its slot in `max_calls` forever. An unreadable channel list is never read as "every call ended":
+ambiguity leaves live calls untouched.
 
 ### One Shot Simulation (`centralized`)
 
@@ -139,6 +161,29 @@ OVH_SIP_PROXY=your-ovh-sip-proxy
 
 Then render and apply the Asterisk configuration using the tooling that owns that setup. Do not copy these values into the BloxSmith blueprint or a plain block config. The block only needs local ARI access and the secret reference for the ARI password.
 
+## Asterisk compatibility
+
+| | Version | Scope |
+| --- | --- | --- |
+| Tested | **20.6.0** (Asterisk 20 LTS) | The only version this block has been exercised against |
+| Required | **16.6 or later** | Version that introduced the `externalMedia` ARI resource |
+
+Asterisk 16.6 is a declared requirement derived from the features the block uses, not tested evidence.
+Only 20.6.0 has been run. Other versions are unverified, not known to be incompatible.
+
+The block depends on three Asterisk behaviors:
+
+- the `externalMedia` ARI resource, added in Asterisk 16.6, which creates a `UnicastRTP` channel;
+- the `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT` channel variables set by `chan_rtp`, which
+  give the address the block must send return RTP to;
+- the `eventFilter` application resource, used to subscribe to two event types only; it is optional, so an older or restricted server still works;
+- the `slin16` format, whose RTP payload type `118` is fixed in the Asterisk RTP engine for 16 kHz signed
+  linear audio. The block starts from that value and then follows the payload type observed on inbound RTP.
+
+Asterisk 20 is an LTS release: its bug-fix support ends in October 2026 and its security support in
+October 2027. Asterisk 22 is the current LTS. Moving to another Asterisk version requires a new test run,
+exactly like a new BloxSmith version.
+
 ## Asterisk requirement
 
 Asterisk must already register the OVH line and route matching inbound calls to the configured Stasis application, for example:
@@ -149,7 +194,7 @@ exten => s,1,Stasis(bloxsmith)
  same => n,Hangup()
 ```
 
-The block needs ARI access and, for audio, permission to create bridges, play media, and create external media channels. FFmpeg must be installed with `libopus`, and Asterisk's core `sound:silence/1` prompt must be installed.
+The block needs ARI access and, for audio, permission to create bridges, play media, and create external media channels. It also declares its event filter, which requires no extra permission. FFmpeg must be installed with `libopus`, and Asterisk's core `sound:silence/1` prompt must be installed.
 
 When Asterisk is behind NAT, configure the PJSIP transport with `local_net`, `external_media_address`, and `external_signaling_address`. Route the SIP UDP port and Asterisk RTP UDP range to the Asterisk host. Otherwise OVH can answer the SIP dialog but drop the call after its media timeout even though ARI setup succeeds.
 
@@ -171,7 +216,8 @@ When Asterisk is behind NAT, configure the PJSIP transport with `local_net`, `ex
 - The block captures only calls Asterisk routes into its Stasis application.
 - The current release does not dial outbound calls, play prompts, collect DTMF, record files itself, or transcribe audio.
 - RTP delivery is transient; there is no persisted event journal or replay.
-- Asterisk, RTP and FFmpeg failures stop the affected capture and surface a redacted runtime error.
+- Asterisk, RTP and FFmpeg failures stop the affected capture and are reported as call events and a degraded state, without stopping the listener.
+- Calls active when the ARI connection drops are released locally and reported with `aborted=true`; their caller channels are left to Asterisk.
 - Never expose the ARI HTTP/WebSocket port, SIP port, or RTP range directly to untrusted networks.
 - Recording telephone calls can require caller consent and may be regulated; configure and retain audio only where lawful.
 
