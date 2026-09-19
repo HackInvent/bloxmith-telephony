@@ -1,4 +1,4 @@
-<div class="modal-panel block-config-modal telephony-in-ui" role="dialog" aria-modal="true" aria-labelledby="{{ node_id }}TelephonyTitle" data-generic-block-modal-root data-node-id="{{ node_id }}" data-node-kind="{{ node_kind }}">
+<div class="modal-panel block-config-modal telephony-ui" role="dialog" aria-modal="true" aria-labelledby="{{ node_id }}TelephonyTitle" data-generic-block-modal-root data-node-id="{{ node_id }}" data-node-kind="{{ node_kind }}">
   <div class="modal-header">
     <div>
       <span class="panel-kicker">Bloc {{ node_kind_title }}</span>
@@ -13,7 +13,7 @@
     <section class="ports-editor-section">
       <div class="ports-editor-header"><span class="group-label">Connexion ARI</span></div>
       {{ config_warning }}
-      <p class="telephony-in-summary">Cible actuelle : <strong>{{ ari_target }}</strong></p>
+      <p class="telephony-summary">Cible actuelle : <strong>{{ ari_target }}</strong></p>
       <div class="field-group">
         <label for="{{ node_id }}TelephonyName">Nom du bloc</label>
         <input id="{{ node_id }}TelephonyName" data-block-title-field type="text" autocomplete="off" value="{{ node_title }}" />
@@ -65,9 +65,9 @@
       <div class="ports-editor-header"><span class="group-label">Audio et média</span></div>
       <label class="checkbox-line" for="{{ node_id }}TelephonyCapture">
         <input id="{{ node_id }}TelephonyCapture" data-block-config-field="capture_audio" data-block-value-type="boolean" type="checkbox" {{ capture_audio_checked }} />
-        <span>Capturer l'audio de l'appel sur <code>audio_out</code></span>
+        <span>Activer le média bidirectionnel de l'appel</span>
       </label>
-      <p class="field-hint">Sans capture, seuls les événements d'appel sont publiés. Avec capture, FFmpeg et un consommateur audio relié à <code>audio_out</code> sont requis.</p>
+      <p class="field-hint">Sans média, seuls les événements d'appel sont publiés. Avec média, la voix de l'appelant sort sur <code>audio_out</code> et ce qui arrive sur <code>audio_in</code> lui est joué. FFmpeg est requis.</p>
       <div class="field-group">
         <label for="{{ node_id }}TelephonyMediaHost">Hôte média local</label>
         <input id="{{ node_id }}TelephonyMediaHost" data-block-config-field="media_host" type="text" autocomplete="off" spellcheck="false" value="{{ media_host }}" />
@@ -89,7 +89,7 @@
       {{ ports_html }}
       {{ runtime_html }}
       {{ error_html }}
-      <p class="inspector-copy">Les trois sorties sont fixes. Reliez <code>audio_out</code> et <code>command_out</code> au même consommateur audio pour un enregistrement corrélé.</p>
+      <p class="inspector-copy">Les ports sont fixes. Reliez <code>audio_out</code> et <code>command_out</code> au même consommateur pour une capture corrélée, et la sortie d'un bloc de synthèse vocale sur <code>audio_in</code> et <code>command_in</code> pour répondre à l'appelant.</p>
     </section>
   </div>
 

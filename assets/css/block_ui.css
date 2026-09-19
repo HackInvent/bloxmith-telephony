@@ -1,7 +1,7 @@
 /* Release-scoped polish only. The canvas card, modal and inspector use the shared
    framework classes, so every surface stays readable and theme-correct even when
    this stylesheet is not applied (bundled nodes carry no release scope). */
-[data-block-release="telephony_in@0.0.1"] .telephony-in-summary {
+[data-block-release="telephony@0.0.1"] .telephony-summary {
   margin: 0 0 14px;
   padding: 10px 12px;
   border: 1px solid var(--line);
@@ -12,7 +12,7 @@
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-[data-block-release="telephony_in@0.0.1"] .telephony-in-ui .checkbox-line {
+[data-block-release="telephony@0.0.1"] .telephony-ui .checkbox-line {
   display: flex;
   gap: 10px;
   align-items: flex-start;
@@ -21,23 +21,23 @@
   font-size: 0.9rem;
   line-height: 1.35;
 }
-[data-block-release="telephony_in@0.0.1"] .telephony-in-ui .checkbox-line input {
+[data-block-release="telephony@0.0.1"] .telephony-ui .checkbox-line input {
   width: auto;
   margin-top: 2px;
 }
-[data-block-release="telephony_in@0.0.1"] .telephony-in-ui .group-label {
+[data-block-release="telephony@0.0.1"] .telephony-ui .group-label {
   display: block;
   margin: 18px 0 10px;
 }
-[data-block-release="telephony_in@0.0.1"] .telephony-in-ui code {
+[data-block-release="telephony@0.0.1"] .telephony-ui code {
   overflow-wrap: anywhere;
 }
-[data-block-release="telephony_in@0.0.1"] .telephony-in-ui > .inspector-actions {
+[data-block-release="telephony@0.0.1"] .telephony-ui > .inspector-actions {
   gap: 12px;
   padding: 14px 18px;
   border-top: 1px solid var(--line);
   background: var(--panel);
 }
-[data-block-release="telephony_in@0.0.1"] .telephony-in-ui > .inspector-actions .field-hint {
+[data-block-release="telephony@0.0.1"] .telephony-ui > .inspector-actions .field-hint {
   margin-right: auto;
 }

@@ -1,4 +1,4 @@
-# Telephony In
+# Telephony
 
 <!-- block-metadata:start -->
 [![Block version: 0.0.1](https://img.shields.io/badge/block-0.0.1-blue)](model.json)
@@ -11,15 +11,24 @@ Verified BloxSmith versions: **1.0.9** (bundled-block tests; see [test evidence]
 [![Asterisk: tested 20.6.0](https://img.shields.io/badge/Asterisk-tested%2020.6.0-orange)](#asterisk-compatibility)
 [![Asterisk: requires 16.6+](https://img.shields.io/badge/Asterisk-requires%2016.6%2B-lightgrey)](#asterisk-compatibility)
 
-Receive inbound telephone calls from an OVHcloud SIP line through an existing local Asterisk server and expose them to a BloxSmith blueprint as normalized call events and runtime audio.
+Answer inbound telephone calls from an OVHcloud SIP line through an existing local Asterisk server, expose them to a BloxSmith blueprint as normalized call events and runtime audio, and play the blueprint's audio back to the caller on the same call.
 
 ## Role
 
-`telephony_in` is a source block. Asterisk remains the SIP endpoint for OVH. The block connects to the local Asterisk ARI application, receives `StasisStart` and `StasisEnd` events, and publishes:
+`telephony` owns one inbound call leg, in both directions. Asterisk remains the SIP endpoint for OVH.
+The block connects to the local Asterisk ARI application, receives `StasisStart` and `StasisEnd` events, and
+publishes:
 
 - `event_out`: JSON call lifecycle events.
-- `audio_out`: Opus/Ogg runtime audio, when capture is enabled.
+- `audio_out`: Opus/Ogg runtime audio, when call media is enabled.
 - `command_out`: correlated JSON `start`/`stop` commands for audio consumers.
+
+It also accepts, on the same call leg:
+
+- `audio_in`: runtime audio to play to the caller, in Opus or raw `pcm_s16le`.
+- `command_in`: the correlated `start`/`stop` commands of that producer.
+
+Both inputs are optional. A blueprint that only listens leaves them unconnected.
 
 The block does not register the OVH SIP trunk itself. Reuse the Asterisk/PJSIP registration from your existing OVH configuration and route the selected inbound context to `Stasis(<ari_app>)`.
 
@@ -82,13 +91,31 @@ Connect it to a compatible audio consumer such as `Save Audio` or a supported tr
 | `expected_context` | empty | Optional inbound context filter. Empty accepts all contexts routed to the app. |
 | `expected_extension` | empty | Optional inbound extension filter. Empty accepts all extensions. |
 | `auto_answer` | `true` | Answer matching incoming calls; this is independent of `capture_audio`. |
-| `capture_audio` | `true` | Create an Asterisk external-media bridge and publish call audio. |
+| `capture_audio` | `true` | Attach the two-way external media leg: publish call audio and allow playback. |
 | `media_host` | `127.0.0.1` | Address advertised to Asterisk for RTP. |
 | `media_port` | `0` | Fixed UDP port, or `0` for an ephemeral local port. |
 | `ffmpeg_chunk_ms` | `100` | Encoder read target, from 20 to 1000 ms. |
 | `max_calls` | `1` | Concurrent captured calls, from 1 to 8. |
 
 Changing the app name, capture mode, audio route, or listener declaration requires Stop, then Load/Run again in Active Runtime.
+
+## Playback input
+
+`audio_in` (ID 1) accepts `audio/*` on an `audio_stream` transport, in `opus` or `pcm_s16le`, at any sample
+rate, mono or stereo. It matches what the workspace audio producers emit, so the output of a text-to-speech
+block connects to it directly. `command_in` (ID 2) takes that producer's JSON commands.
+
+Incoming audio is decoded to the 16 kHz mono signed linear format Asterisk expects and played on the call's
+return RTP leg. Playback starts once a short cushion is buffered, so producer jitter is not audible, and the
+leg falls back to silence between two answers, which keeps the media path open.
+
+One stream is played at a time: a frame carrying a new `stream_id` replaces the current answer instead of
+queuing behind it, and a `stop` command marked `aborted` drops what is still buffered. That is what a
+barge-in needs — the caller interrupting must not wait for the previous sentence to finish.
+
+Playback requires call media to be enabled, since it travels on the external media channel created for
+capture. It is meant for one active call: with several simultaneous calls, the same audio is sent to each of
+them, so keep `max_calls` at `1` when the blueprint answers.
 
 ## Command output
 
@@ -116,7 +143,7 @@ The three surfaces are block-owned and reuse the shared editor chrome, so they s
 
 Numeric controls declare the same bounds as the runtime validator. A stored value that fails validation does not break a surface: the offending setting falls back to its default, the reason is reported next to the fields, and the value can be corrected in place.
 
-Release assets declared in `model.json.ui_assets` are scoped to `telephony_in@<version>`, which the editor applies to installed releases. Every surface must therefore remain readable through the shared classes alone, since a bundled node carries no release scope.
+Release assets declared in `model.json.ui_assets` are scoped to `telephony@<version>`, which the editor applies to installed releases. Every surface must therefore remain readable through the shared classes alone, since a bundled node carries no release scope.
 
 ## Runtime behavior
 
@@ -126,7 +153,7 @@ After Run, the persistent listener connects to Asterisk ARI and declares an even
 
 A dedicated sender then returns standards-compliant 20 ms RTP for the whole call, at its own pace and independently of the inbound flow, so the return path never stalls while the caller speaks. It starts from Asterisk's `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT`, then follows the source address, payload type and frame size observed on inbound RTP, as symmetric RTP requires. Each call owns its RTP synchronization source.
 
-Inbound RTP is transcoded from Asterisk's big-endian `slin16` PCM to Opus/Ogg and published through `audio_out`. External media channels join the same Stasis application, so Asterisk announces them like inbound calls; the block recognizes its own and ignores them, and `max_calls` therefore counts real callers only. `StasisEnd` drains the capture, publishes the correlated stop command and `call.ended`, and only then releases the Asterisk resources: a cleanup error never costs the audio consumer its stop command or its exact counters.
+Inbound RTP is transcoded from Asterisk's big-endian `slin16` PCM to Opus/Ogg and published through `audio_out`, while audio received on `audio_in` is decoded to `slin16` and carried by that same return sender, which falls back to silence when there is nothing to say. External media channels join the same Stasis application, so Asterisk announces them like inbound calls; the block recognizes its own and ignores them, and `max_calls` therefore counts real callers only. `StasisEnd` drains the capture, publishes the correlated stop command and `call.ended`, and only then releases the Asterisk resources: a cleanup error never costs the audio consumer its stop command or its exact counters.
 
 ### Failure handling
 

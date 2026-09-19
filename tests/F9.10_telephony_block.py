@@ -21,7 +21,7 @@ for item in reversed(sys_path):
         __import__("sys").path.insert(0, item)
 import sys
 
-from blocs.telephony_in.block import DEFAULTS, TelephonyInBlock, config, _event, _rtp_payload
+from blocs.telephony.block import DEFAULTS, TelephonyBlock, config, _event, _rtp_payload
 from blocs.display.block import DisplayBlock
 from bloxsmith_app.block_api import BlockRuntimeContext
 from bloxsmith_app.block_runtime import BlockRuntimePreparationContext
@@ -46,14 +46,14 @@ def until(predicate, message, timeout=8):
     raise AssertionError(message)
 
 
-def ports(block=TelephonyInBlock()):
+def ports(block=TelephonyBlock()):
     inputs = tuple(SimpleNamespace(**item) for item in block.model["ports"]["inputs"])
     outputs = tuple(SimpleNamespace(**item) for item in block.model["ports"]["outputs"])
     return inputs, outputs
 
 
 def runtime_context(mode="centralized", overrides=None, services=None):
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     inputs, outputs = ports(block)
     return BlockRuntimeContext(
         run_id="run-telephony", node_id="tele", kind=block.kind,
@@ -64,7 +64,7 @@ def runtime_context(mode="centralized", overrides=None, services=None):
 
 
 def preparation_context(mode="zeromq_active", overrides=None):
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     inputs, outputs = ports(block)
     return BlockRuntimePreparationContext(
         run_id="run-telephony", node_id="tele", kind=block.kind,
@@ -88,7 +88,7 @@ def test_contract_config_ports_ui():
         else:
             raise AssertionError(f"Invalid setting accepted: {values}")
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     assert block.model["version"] == "0.0.1"
     command_port = next(port for port in block.model["ports"]["outputs"] if port["name"] == "command_out")
     assert command_port["id"] == 3 and command_port["transport"] == "message"
@@ -96,7 +96,7 @@ def test_contract_config_ports_ui():
     assert block.prepare_runtime(preparation_context("zeromq_active")).listen_on_run is True
     assert "node_card" not in block.model, "Telephony must use the renderer's standard node geometry"
     # Release assets are scoped to the declared version; a stale scope silently applies to nothing.
-    scope = f'[data-block-release="telephony_in@{block.model["version"]}"]'
+    scope = f'[data-block-release="telephony@{block.model["version"]}"]'
     block_css = (Path(__file__).parents[1] / "assets/css/block_ui.css").read_text(encoding="utf-8")
     assert scope in block_css, "Release CSS must be scoped to the declared block version"
     for declared in block.model["ui_assets"].values():
@@ -110,11 +110,19 @@ def test_contract_config_ports_ui():
     else:
         raise AssertionError("Preparation must reject an invalid ARI app before Run.")
 
-    # Altered output identities reject before any ARI or media side effect.
+    # Altered port identities reject before any ARI or media side effect.
     altered = runtime_context()
     altered.output_ports = (SimpleNamespace(id=1, name="wrong", transport="message"),)
     result = block.execute_runtime(altered)
-    assert result.status == "failed" and "fixed outputs" in result.error
+    assert result.status == "failed" and "event_out" in result.error
+    altered = runtime_context()
+    altered.input_ports = (SimpleNamespace(id=1, name="wrong", transport="audio_stream"),)
+    result = block.execute_runtime(altered)
+    assert result.status == "failed" and "audio_in" in result.error
+    playback_port = next(port for port in block.model["ports"]["inputs"] if port["name"] == "audio_in")
+    assert playback_port["transport"] == "audio_stream" and playback_port["required"] is False
+    # The playback port must accept what the audio producers of the workspace emit.
+    assert set(playback_port["audio_stream"]["codecs"]) >= {"opus", "pcm_s16le"}
 
     node = block.build_node_payload(node_id="tele")
     modal = block.render_modal(node=node)["html"]
@@ -139,7 +147,7 @@ def test_contract_config_ports_ui():
 
 def test_ui_surfaces_expose_every_setting():
     """FB7: modal and control panel expose every editable attribute and survive bad values."""
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     node = block.build_node_payload(node_id="tele-ui")
     surfaces = {
         "modal": block.render_modal(node=node)["html"],
@@ -171,7 +179,7 @@ def test_ui_surfaces_expose_every_setting():
 def test_centralized_simulation():
     """FB6: centralized graph validates and skips without ARI or fabricated calls."""
     with isolated_server() as server:
-        block = TelephonyInBlock()
+        block = TelephonyBlock()
         node = block.build_node_payload(node_id="tele")
         document = graph_payload("Telephony centralized", [node], [])
         created = create_run_api(server, document, runtime_mode="centralized")
@@ -190,7 +198,7 @@ def test_event_normalization_and_listener_emission():
     assert event["provider"] == "asterisk" and event["from"] == "+33612345678"
     assert event["context"] == "from-ovh" and event["to"] == "s"
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     emitted = []
     context = SimpleNamespace(emit_result=emitted.append)
     client = AsyncRequestRecorder()
@@ -222,22 +230,22 @@ class AsyncRequestRecorder:
 
 def test_media_setup_failure_releases_transport():
     """FB5/FB9: a failed media setup closes local IO, reports call.failed and keeps running."""
-    from blocs.telephony_in.block import _MediaSession, TelephonyInError
+    from blocs.telephony.block import _MediaSession, TelephonyError
 
     class FailingClient(AsyncRequestRecorder):
         async def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
             if args and args[1] == "/channels/externalMedia":
-                raise TelephonyInError("ARI external media refused")
+                raise TelephonyError("ARI external media refused")
             return {}
 
     async def scenario():
-        block = TelephonyInBlock()
+        block = TelephonyBlock()
         settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": True, "auto_answer": False})
         emitted = []
         context = SimpleNamespace(emit_result=emitted.append)
         sessions = {}
-        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        module = __import__("blocs.telephony.block", fromlist=["_AudioEncoder"])
         original = module._AudioEncoder
         module._AudioEncoder = FakeEncoder
         try:
@@ -255,7 +263,7 @@ def test_media_setup_failure_releases_transport():
         # The framework stops the worker on the first failed listener result, so one
         # broken call must be reported as a call event and a degraded state instead.
         assert all(result.status != "failed" for result in emitted), "One call must not fail the node"
-        assert emitted[-1].metadata["telephony_in"]["state"] == "call_failed"
+        assert emitted[-1].metadata["telephony"]["state"] == "call_failed"
 
     asyncio.run(scenario())
 
@@ -264,7 +272,7 @@ def test_real_opus_encoder():
     """FB2: RTP's big-endian linear PCM becomes decodable Ogg/Opus audio."""
     if shutil.which("ffmpeg") is None:
         raise AssertionError("FFmpeg is required by the telephony audio contract.")
-    from blocs.telephony_in.block import _AudioEncoder
+    from blocs.telephony.block import _AudioEncoder
 
     expected = [int(10000 * math.sin(2 * math.pi * 440 * index / 16000)) for index in range(3200)]
     pcm = b"".join(sample.to_bytes(2, "big", signed=True) for sample in expected)
@@ -321,7 +329,7 @@ def test_active_graph_with_fake_ari():
             wallet.initialize("test-wallet-password")
             wallet.set_secret(ref=REF, value="ari-test-password")
             engine = WorkflowOrchestrator(root_dir=root, runs_dir=root / "runs", secret_manager=wallet)
-            tele = TelephonyInBlock().build_node_payload(node_id="tele", config_overrides={
+            tele = TelephonyBlock().build_node_payload(node_id="tele", config_overrides={
                 "ari_base_url": f"http://127.0.0.1:{port}", "ari_password_ref": REF,
                 "ari_app": "bloxsmith", "capture_audio": False, "auto_answer": False,
             })
@@ -401,10 +409,10 @@ def test_rtp_payload_skips_extension_header():
 
 def test_correlated_audio_commands():
     """FB2/FB8: media start/stop emits exact, correlated STT command counters."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
     async def scenario():
-        block = TelephonyInBlock()
+        block = TelephonyBlock()
         client = AsyncRequestRecorder()
         client.responses = [{"id": "external-1"}, {"id": "bridge-1"}]
         audio = FakeAudioClient()
@@ -412,7 +420,7 @@ def test_correlated_audio_commands():
         emitted = []
         context = SimpleNamespace(emit_result=emitted.append)
         sessions = {}
-        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        module = __import__("blocs.telephony.block", fromlist=["_AudioEncoder"])
         original = module._AudioEncoder
         module._AudioEncoder = FakeEncoder
         channel = {"id": "command-call", "caller": {}, "dialplan": {}}
@@ -466,16 +474,16 @@ def test_correlated_audio_commands():
 
 def test_audio_media_attach_publish_and_release():
     """FB2/FB5: external media, RTP pumping, Opus publication and cleanup work."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
     async def scenario():
         client = AsyncRequestRecorder()
         client.responses = [{"id": "external-1"}, {"id": "bridge-1"}]
         audio = FakeAudioClient()
-        block = TelephonyInBlock()
+        block = TelephonyBlock()
         settings = config({**DEFAULTS, "ari_password_ref": REF})
         session = _MediaSession(call_id="call-1", channel_id="caller-1")
-        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        module = __import__("blocs.telephony.block", fromlist=["_AudioEncoder"])
         original = module._AudioEncoder
         module._AudioEncoder = FakeEncoder
         try:
@@ -532,16 +540,16 @@ def test_audio_media_attach_publish_and_release():
 
 def test_proactive_rtp_before_inbound_media():
     """FB5: external-media return RTP starts before Asterisk sends inbound audio."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
     async def scenario():
         socket = __import__("socket")
         client = AsyncRequestRecorder()
         audio = FakeAudioClient()
-        block = TelephonyInBlock()
+        block = TelephonyBlock()
         settings = config({**DEFAULTS, "ari_password_ref": REF})
         session = _MediaSession(call_id="call-proactive", channel_id="caller-proactive")
-        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        module = __import__("blocs.telephony.block", fromlist=["_AudioEncoder"])
         original = module._AudioEncoder
         module._AudioEncoder = FakeEncoder
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as asterisk_media:
@@ -574,16 +582,16 @@ def test_proactive_rtp_before_inbound_media():
 
 def test_return_rtp_cadence_survives_inbound_audio():
     """FB5: the return cadence keeps its own pace while Asterisk sends call audio."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
     async def scenario():
         socket = __import__("socket")
         client = AsyncRequestRecorder()
         audio = FakeAudioClient()
-        block = TelephonyInBlock()
+        block = TelephonyBlock()
         settings = config({**DEFAULTS, "ari_password_ref": REF})
         session = _MediaSession(call_id="call-cadence", channel_id="caller-cadence")
-        module = __import__("blocs.telephony_in.block", fromlist=["_AudioEncoder"])
+        module = __import__("blocs.telephony.block", fromlist=["_AudioEncoder"])
         original = module._AudioEncoder
         module._AudioEncoder = FakeEncoder
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as asterisk_media:
@@ -624,9 +632,9 @@ def test_return_rtp_cadence_survives_inbound_audio():
 
 def test_external_media_channel_is_not_taken_for_a_call():
     """FB1/FB8: the block never answers its own external media channels as new calls."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     client = AsyncRequestRecorder()
     emitted = []
     context = SimpleNamespace(emit_result=emitted.append)
@@ -654,7 +662,7 @@ def test_external_media_channel_is_not_taken_for_a_call():
 
 def test_sessions_use_distinct_ssrc():
     """FB5: every call owns its RTP synchronization source, as RFC 3550 requires."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
     sources = {_MediaSession(call_id=f"call-{index}", channel_id=f"chan-{index}").rtp_ssrc
                for index in range(5)}
@@ -700,7 +708,7 @@ def test_listener_reconnects_after_a_dropped_connection():
     """FB9: a lost ARI connection is retried instead of stopping the worker."""
     import websockets.asyncio.client as ws_client
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": False})
     context, emitted = listener_context(stop_after=400)
     attempts = []
@@ -714,7 +722,7 @@ def test_listener_reconnects_after_a_dropped_connection():
         context.stop_requested = lambda: True
         return FakeWebSocket([])
 
-    original, module = ws_client.connect, __import__("blocs.telephony_in.block", fromlist=["block"])
+    original, module = ws_client.connect, __import__("blocs.telephony.block", fromlist=["block"])
     ws_client.connect = fake_connect
     module.RECONNECT_MIN_DELAY = 0.01
     module.RECONNECT_MAX_DELAY = 0.02
@@ -725,7 +733,7 @@ def test_listener_reconnects_after_a_dropped_connection():
         module.RECONNECT_MIN_DELAY, module.RECONNECT_MAX_DELAY = 1.0, 30.0
 
     assert len(attempts) >= 3, "The listener must keep retrying after a dropped connection"
-    states = [result.metadata["telephony_in"]["state"] for result in emitted]
+    states = [result.metadata["telephony"]["state"] for result in emitted]
     assert "reconnecting" in states and states.count("connected") >= 1
     assert all(result.status != "failed" for result in emitted), \
         "A reconnection must not report a failed result, which would stop the worker"
@@ -733,16 +741,16 @@ def test_listener_reconnects_after_a_dropped_connection():
 
 def test_transient_answer_failure_releases_the_caller():
     """FB9: an ARI error while answering fails one call and hangs up its channel."""
-    from blocs.telephony_in.block import TelephonyInError
+    from blocs.telephony.block import TelephonyError
 
     class AnswerFailure(AsyncRequestRecorder):
         async def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
             if args and args[1].endswith("/answer"):
-                raise TelephonyInError("Asterisk ARI est injoignable.")
+                raise TelephonyError("Asterisk ARI est injoignable.")
             return {}
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     client = AnswerFailure()
     emitted = []
     context = SimpleNamespace(emit_result=emitted.append)
@@ -763,16 +771,16 @@ def test_transient_answer_failure_releases_the_caller():
 
 def test_stop_command_survives_a_cleanup_failure():
     """FB9: the audio consumer gets its stop command even if Asterisk cleanup fails."""
-    from blocs.telephony_in.block import _MediaSession, TelephonyInError
+    from blocs.telephony.block import _MediaSession, TelephonyError
 
     class CleanupFailure(AsyncRequestRecorder):
         async def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
             if args and args[0] == "DELETE":
-                raise TelephonyInError("Asterisk ARI est injoignable.")
+                raise TelephonyError("Asterisk ARI est injoignable.")
             return {}
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     emitted = []
     context = SimpleNamespace(emit_result=emitted.append)
     session = _MediaSession(call_id="ari-cleanup", channel_id="cleanup-call",
@@ -793,7 +801,7 @@ def test_stop_command_survives_a_cleanup_failure():
 
 def test_missed_end_event_is_recovered_by_the_audit():
     """FB9: a call whose Asterisk channel disappeared is closed instead of leaking."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
     class ChannelList(AsyncRequestRecorder):
         def __init__(self, channels):
@@ -804,7 +812,7 @@ def test_missed_end_event_is_recovered_by_the_audit():
             self.requests.append((args, kwargs))
             return self.channels if args and args[0] == "GET" else {}
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     emitted = []
     context = SimpleNamespace(emit_result=emitted.append)
     session = _MediaSession(call_id="ari-ghost", channel_id="ghost-call")
@@ -825,7 +833,7 @@ def test_missed_end_event_is_recovered_by_the_audit():
 
 def test_encoder_failure_keeps_the_call_alive():
     """FB9: a dead encoder aborts one capture without tearing down the session."""
-    from blocs.telephony_in.block import _MediaSession
+    from blocs.telephony.block import _MediaSession
 
     class BrokenEncoder(FakeEncoder):
         async def feed(self, payload):
@@ -839,7 +847,7 @@ def test_encoder_failure_keeps_the_call_alive():
         session = _MediaSession(call_id="ari-broken", channel_id="broken-call")
         queue = asyncio.Queue(maxsize=4)
         await queue.put((("127.0.0.1", 4000), 118, b"pcm"))
-        pump = asyncio.create_task(TelephonyInBlock._pump_media(session, BrokenEncoder(), queue, audio))
+        pump = asyncio.create_task(TelephonyBlock._pump_media(session, BrokenEncoder(), queue, audio))
         await until_async(lambda: session.aborted, "The capture must report itself aborted")
         session.stopping = True
         await asyncio.wait_for(pump, timeout=2)
@@ -861,14 +869,14 @@ async def until_async(predicate, message, timeout=2):
 def test_event_filter_is_declared_and_optional():
     """FB9: the app subscribes to the two event types it uses, and tolerates a refusal."""
     import websockets.asyncio.client as ws_client
-    from blocs.telephony_in.block import TelephonyInError
+    from blocs.telephony.block import TelephonyError
 
     class Refusing(AsyncRequestRecorder):
         async def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
-            raise TelephonyInError("Asterisk ARI a refusé la requête (404).")
+            raise TelephonyError("Asterisk ARI a refusé la requête (404).")
 
-    block = TelephonyInBlock()
+    block = TelephonyBlock()
     settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": False, "ari_app": "bloxsmith"})
 
     def as_ari(recorder):
@@ -897,7 +905,88 @@ def test_event_filter_is_declared_and_optional():
         assert args == ("PUT", "/applications/bloxsmith/eventFilter"), args
         assert kwargs["body"] == {"allowed": [{"type": "StasisStart"}, {"type": "StasisEnd"}]}
         # A server that refuses the filter keeps sending everything; the session goes on.
-        assert emitted and emitted[0].metadata["telephony_in"]["state"] == "connected"
+        assert emitted and emitted[0].metadata["telephony"]["state"] == "connected"
+
+
+def test_graph_audio_is_played_to_the_caller():
+    """FB10: audio buffered for playback leaves on the call's return RTP leg."""
+    from blocs.telephony.block import _MediaSession, _Playback
+
+    async def scenario():
+        socket = __import__("socket")
+        client = AsyncRequestRecorder()
+        audio = FakeAudioClient()
+        block = TelephonyBlock()
+        settings = config({**DEFAULTS, "ari_password_ref": REF})
+        session = _MediaSession(call_id="call-play", channel_id="caller-play")
+        playback = _Playback()
+        answer = bytes(range(256)) * 10  # 2560 bytes: more than the prebuffer of three frames
+        playback.buffer.extend(answer)
+        module = __import__("blocs.telephony.block", fromlist=["_AudioEncoder"])
+        original = module._AudioEncoder
+        module._AudioEncoder = FakeEncoder
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as asterisk_media:
+            asterisk_media.bind(("127.0.0.1", 0))
+            asterisk_media.settimeout(2)
+            host, port = asterisk_media.getsockname()
+            client.responses = [{
+                "id": "external-play",
+                "channelvars": {"UNICASTRTP_LOCAL_ADDRESS": host, "UNICASTRTP_LOCAL_PORT": str(port)},
+            }, {"id": "bridge-play"}]
+            try:
+                await block._start_media(client, settings, session, audio, playback)
+                loop = asyncio.get_running_loop()
+                packet, _ = await loop.run_in_executor(None, asterisk_media.recvfrom, 65536)
+                assert packet[12:] == answer[:640], "The return leg must carry the graph audio"
+                assert packet[1] & 0x7f == 118, "Playback keeps the negotiated payload type"
+                await until_async(lambda: session.playback_frame_count >= 1, "Playback was not counted")
+            finally:
+                module._AudioEncoder = original
+                await session.close()
+
+        # Barge-in: an aborted answer is dropped instead of being played to its end.
+        await playback.reset()
+        assert not playback.buffer and not playback.playing and not playback.stream_id
+
+    asyncio.run(scenario())
+
+
+def test_playback_decodes_a_producer_stream():
+    """FB10: an Ogg/Opus answer from a producer block becomes Asterisk slin16 frames."""
+    if shutil.which("ffmpeg") is None:
+        raise AssertionError("FFmpeg is required by the telephony audio contract.")
+    from blocs.telephony.block import _Playback
+
+    samples = [int(9000 * math.sin(2 * math.pi * 440 * index / 48000)) for index in range(48000)]
+    source = b"".join(sample.to_bytes(2, "little", signed=True) for sample in samples)
+    encoded = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", "48000", "-ac", "1",
+         "-i", "pipe:0", "-c:a", "libopus", "-b:a", "32000", "-f", "ogg", "pipe:1"],
+        input=source, capture_output=True, timeout=20, check=True,
+    ).stdout
+    assert encoded.startswith(b"OggS")
+
+    async def scenario():
+        playback = _Playback()
+        # One Ogg stream delivered like a producer publishes it, in successive frames.
+        for offset in range(0, len(encoded), 4096):
+            await playback.feed(SimpleNamespace(
+                stream_id="tts-1", codec="opus", sample_rate_hz=48000, channels=1,
+                payload=encoded[offset:offset + 4096]))
+        async def decoded_enough():
+            playback.drain()
+            return len(playback.buffer) >= 640 * 3
+
+        end = time.monotonic() + 5
+        while time.monotonic() < end and not await decoded_enough():
+            await asyncio.sleep(0.02)
+        assert len(playback.buffer) >= 640 * 3, "Nothing was decoded for playback"
+        frame = playback.take(640)
+        assert frame is not None and len(frame) == 640, "Decoded audio must be served as 20 ms frames"
+        assert frame != bytes(640), "Decoded playback must not be silence"
+        await playback.reset()
+
+    asyncio.run(scenario())
 
 
 def main():
@@ -917,11 +1006,13 @@ def main():
     test_missed_end_event_is_recovered_by_the_audit()
     test_encoder_failure_keeps_the_call_alive()
     test_event_filter_is_declared_and_optional()
+    test_graph_audio_is_played_to_the_caller()
+    test_playback_decodes_a_producer_stream()
     test_rtp_payload_skips_extension_header()
     test_media_setup_failure_releases_transport()
     test_real_opus_encoder()
     test_active_graph_with_fake_ari()
-    print("[ok] F9.10_telephony_in_block")
+    print("[ok] F9.10_telephony_block")
 
 
 if __name__ == "__main__":

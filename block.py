@@ -14,6 +14,7 @@
 # FB7 - Render block-owned modal, inspector and compact node-card surfaces.
 # FB8 - Support concurrent bounded calls and cooperative listener shutdown.
 # FB9 - Survive ARI disconnections, per-call failures and missed end events.
+# FB10 - Play graph audio to the caller on the same RTP leg, newest stream first.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -67,9 +68,15 @@ _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 RECONNECT_MIN_DELAY = 1.0
 RECONNECT_MAX_DELAY = 30.0
 SESSION_AUDIT_INTERVAL = 15.0
+# 20 ms of the mono 16 kHz signed 16-bit audio Asterisk expects on a slin16 leg.
+PLAYBACK_FRAME_BYTES = 640
+# Start playing once a small cushion exists, so producer jitter is not audible.
+PLAYBACK_PREBUFFER_FRAMES = 3
+# A forgotten link, or audio arriving with no call, must not grow without bound.
+PLAYBACK_MAX_BUFFERED_BYTES = 320000
 
 
-class TelephonyInError(RuntimeError):
+class TelephonyError(RuntimeError):
     """Stable block-owned validation or transport failure."""
 
 
@@ -77,13 +84,13 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     """Return one bounded integer, accepting only integral numeric text."""
 
     if isinstance(value, bool):
-        raise TelephonyInError("Les valeurs numériques doivent être des entiers.")
+        raise TelephonyError("Les valeurs numériques doivent être des entiers.")
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise TelephonyInError("Les valeurs numériques doivent être des entiers.") from exc
+        raise TelephonyError("Les valeurs numériques doivent être des entiers.") from exc
     if not minimum <= parsed <= maximum:
-        raise TelephonyInError(f"Valeur hors limites : {minimum} à {maximum}.")
+        raise TelephonyError(f"Valeur hors limites : {minimum} à {maximum}.")
     return parsed
 
 
@@ -91,7 +98,7 @@ def _boolean(value: Any, label: str) -> bool:
     """Require a real boolean so imported string settings cannot become truthy."""
 
     if type(value) is not bool:
-        raise TelephonyInError(f"{label} doit être un booléen.")
+        raise TelephonyError(f"{label} doit être un booléen.")
     return value
 
 
@@ -102,7 +109,7 @@ def _optional_token(value: Any, label: str) -> str:
     if not text:
         return ""
     if len(text) > 128 or not _TOKEN.fullmatch(text):
-        raise TelephonyInError(f"{label} contient des caractères non autorisés.")
+        raise TelephonyError(f"{label} contient des caractères non autorisés.")
     return text
 
 
@@ -116,25 +123,25 @@ def config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         A normalized configuration copy safe to pass to runtime helpers.
 
     Raises:
-        TelephonyInError: When a value has an invalid type, range or format.
+        TelephonyError: When a value has an invalid type, range or format.
     """
 
     source = raw if isinstance(raw, Mapping) else {}
     base = str(source.get("ari_base_url") or DEFAULTS["ari_base_url"]).strip().rstrip("/")
     if not base.startswith(("http://", "https://")) or any(c.isspace() for c in base):
-        raise TelephonyInError("L'URL ARI doit être une adresse HTTP ou HTTPS valide.")
+        raise TelephonyError("L'URL ARI doit être une adresse HTTP ou HTTPS valide.")
     username = str(source.get("ari_username") or DEFAULTS["ari_username"]).strip()
     if not username or len(username) > 128 or any(c in username for c in "\r\n"):
-        raise TelephonyInError("Nom d'utilisateur ARI invalide.")
+        raise TelephonyError("Nom d'utilisateur ARI invalide.")
     password_ref = str(source.get("ari_password_ref") or "").strip()
     if len(password_ref) > 256 or any(c in password_ref for c in "\r\n"):
-        raise TelephonyInError("Référence du secret ARI invalide.")
+        raise TelephonyError("Référence du secret ARI invalide.")
     app = _optional_token(source.get("ari_app", DEFAULTS["ari_app"]), "L'application ARI")
     if not app:
-        raise TelephonyInError("L'application ARI est obligatoire.")
+        raise TelephonyError("L'application ARI est obligatoire.")
     media_host = str(source.get("media_host") or DEFAULTS["media_host"]).strip()
     if not media_host or len(media_host) > 253 or any(c.isspace() for c in media_host):
-        raise TelephonyInError("Hôte média invalide.")
+        raise TelephonyError("Hôte média invalide.")
     return {
         "ari_base_url": base,
         "ari_username": username,
@@ -168,7 +175,7 @@ def display_config(raw: Mapping[str, Any] | None) -> tuple[dict[str, Any], str]:
 
     try:
         return config(raw), ""
-    except TelephonyInError as error:
+    except TelephonyError as error:
         stored = dict(raw) if isinstance(raw, Mapping) else {}
         values = {key: stored.get(key, default) for key, default in DEFAULTS.items()}
         return values, str(error)
@@ -179,13 +186,13 @@ def _secret(context: Any, value_ref: str) -> str:
 
     resolver = context.services.get("resolve_secret")
     if not callable(resolver):
-        raise TelephonyInError("Résolveur de secrets indisponible dans ce runtime.")
+        raise TelephonyError("Résolveur de secrets indisponible dans ce runtime.")
     try:
         value = resolver(value_ref)
     except Exception as exc:
-        raise TelephonyInError("Secret ARI inaccessible : déverrouillez le coffre.") from exc
+        raise TelephonyError("Secret ARI inaccessible : déverrouillez le coffre.") from exc
     if not isinstance(value, str) or not value.strip() or any(c in value for c in "\r\n"):
-        raise TelephonyInError("Le secret ARI est vide ou invalide.")
+        raise TelephonyError("Le secret ARI est vide ou invalide.")
     return value.strip()
 
 
@@ -211,9 +218,9 @@ def _event(event_name: str, channel: Mapping[str, Any], **extra: Any) -> dict[st
 def _failure(error: Exception) -> BlockRuntimeResult:
     """Return a redacted runtime failure for non block-owned exceptions."""
 
-    message = str(error) if isinstance(error, TelephonyInError) else "Erreur de transport Asterisk ou de flux média."
+    message = str(error) if isinstance(error, TelephonyError) else "Erreur de transport Asterisk ou de flux média."
     return BlockRuntimeResult(status="failed", error=message, last_message=message, content_type=TEXT_PLAIN,
-                              metadata={"telephony_in": {"state": "error"}})
+                              metadata={"telephony": {"state": "error"}})
 
 
 @dataclass
@@ -290,10 +297,167 @@ class _AudioEncoder:
                 await self.reader_task
             await self.process.wait()
             if self.process.returncode not in {None, 0}:
-                raise TelephonyInError("FFmpeg n'a pas pu encoder l'audio d'appel.")
+                raise TelephonyError("FFmpeg n'a pas pu encoder l'audio d'appel.")
         except ProcessLookupError:
             pass
         return chunks
+
+
+@dataclass
+class _PlaybackDecoder:
+    """Decode one graph audio stream into the slin16 frames Asterisk expects."""
+
+    process: asyncio.subprocess.Process
+    output_queue: "asyncio.Queue[bytes | None]" = field(default_factory=asyncio.Queue)
+    reader_task: "asyncio.Task[None] | None" = None
+
+    @classmethod
+    async def create(cls, codec: str, sample_rate_hz: int, channels: int) -> "_PlaybackDecoder":
+        """Start an FFmpeg process converting one producer format to slin16.
+
+        Args:
+            codec: Frame codec announced by the producing block.
+            sample_rate_hz: Frame sample rate, used by raw PCM sources only.
+            channels: Frame channel count, used by raw PCM sources only.
+
+        Raises:
+            TelephonyError: When the announced codec is not supported.
+        """
+
+        name = str(codec or "").strip().lower()
+        if name == "opus":
+            # Producers publish Ogg pages, which carry their own rate and channel count.
+            source = ["-f", "ogg"]
+        elif name in {"pcm_s16le", "pcm16", "pcm"}:
+            source = ["-f", "s16le", "-ar", str(int(sample_rate_hz) or 16000), "-ac", str(int(channels) or 1)]
+        else:
+            raise TelephonyError(f"Format audio non pris en charge pour la lecture : {codec}.")
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", *source, "-i", "pipe:0",
+            "-f", "s16be", "-ar", "16000", "-ac", "1", "pipe:1",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        decoder = cls(process=process)
+        decoder.reader_task = asyncio.create_task(decoder._read_stdout())
+        return decoder
+
+    async def _read_stdout(self) -> None:
+        """Drain decoded audio continuously so FFmpeg is never blocked by its pipe."""
+
+        assert self.process.stdout is not None
+        while not self.process.stdout.at_eof():
+            chunk = await self.process.stdout.read(4096)
+            if not chunk:
+                break
+            await self.output_queue.put(chunk)
+        await self.output_queue.put(None)
+
+    async def feed(self, payload: bytes) -> bytes:
+        """Submit one producer frame and return whatever slin16 audio is ready."""
+
+        if self.process.stdin is not None and not self.process.stdin.is_closing():
+            self.process.stdin.write(payload)
+            await self.process.stdin.drain()
+        return self.drain()
+
+    def drain(self) -> bytes:
+        """Collect the audio FFmpeg has produced since the last call.
+
+        Decoding lags behind the input, so the tail of an answer is only ready after the
+        last frame was submitted. The caller drains on every cycle, not only when a new
+        frame arrives, otherwise the end of each sentence stays inside the decoder.
+        """
+
+        decoded = bytearray()
+        while not self.output_queue.empty():
+            chunk = self.output_queue.get_nowait()
+            if chunk is not None:
+                decoded.extend(chunk)
+        return bytes(decoded)
+
+    async def close(self) -> None:
+        """Terminate the decoder, discarding whatever has not been played."""
+
+        try:
+            if self.process.stdin is not None and not self.process.stdin.is_closing():
+                self.process.stdin.close()
+            if self.process.returncode is None:
+                self.process.kill()
+            if self.reader_task is not None:
+                self.reader_task.cancel()
+            await self.process.wait()
+        except (ProcessLookupError, asyncio.CancelledError):
+            pass
+
+
+@dataclass
+class _Playback:
+    """Hold the audio the graph wants the caller to hear, newest stream first.
+
+    The block exposes one playback port for the node, so a new stream identifier
+    replaces the previous one: a barge-in answer must not queue behind the sentence
+    it interrupts.
+    """
+
+    stream_id: str = ""
+    decoder: _PlaybackDecoder | None = None
+    buffer: bytearray = field(default_factory=bytearray)
+    playing: bool = False
+    frames_played: int = 0
+    dropped_bytes: int = 0
+
+    async def feed(self, frame: Any) -> None:
+        """Decode one received frame, switching stream when the producer changes."""
+
+        stream_id = str(getattr(frame, "stream_id", "") or "")
+        if self.decoder is None or stream_id != self.stream_id:
+            await self.reset()
+            self.stream_id = stream_id
+            self.decoder = await _PlaybackDecoder.create(
+                getattr(frame, "codec", ""), getattr(frame, "sample_rate_hz", 0),
+                getattr(frame, "channels", 1))
+        self._store(await self.decoder.feed(bytes(getattr(frame, "payload", b""))))
+
+    def drain(self) -> None:
+        """Move whatever the decoder has finished producing into the playable buffer."""
+
+        if self.decoder is not None:
+            self._store(self.decoder.drain())
+
+    def _store(self, decoded: bytes) -> None:
+        """Append decoded audio, bounded so a forgotten link cannot grow without end."""
+
+        if not decoded:
+            return
+        room = max(0, PLAYBACK_MAX_BUFFERED_BYTES - len(self.buffer))
+        if len(decoded) > room:
+            self.dropped_bytes += len(decoded) - room
+            decoded = decoded[:room]
+        self.buffer.extend(decoded)
+
+    def take(self, size: int) -> bytes | None:
+        """Return the next playable frame, or None when the caller should hear silence."""
+
+        if not self.playing and len(self.buffer) >= size * PLAYBACK_PREBUFFER_FRAMES:
+            self.playing = True
+        if not self.playing:
+            return None
+        if len(self.buffer) < size:
+            self.playing = False
+            return None
+        frame, self.buffer = bytes(self.buffer[:size]), self.buffer[size:]
+        self.frames_played += 1
+        return frame
+
+    async def reset(self) -> None:
+        """Drop the current stream and everything buffered for it."""
+
+        decoder, self.decoder = self.decoder, None
+        self.stream_id, self.playing = "", False
+        self.buffer.clear()
+        if decoder is not None:
+            await decoder.close()
 
 
 @dataclass
@@ -326,6 +490,7 @@ class _MediaSession:
     rtp_received_byte_count: int = 0
     rtp_sent_packet_count: int = 0
     rtp_dropped_packet_count: int = 0
+    playback_frame_count: int = 0
     command_started: bool = False
     aborted: bool = False
     stopping: bool = False
@@ -405,10 +570,10 @@ def _rtp_payload(packet: bytes) -> bytes | None:
     return payload or None
 
 
-class TelephonyInBlock(BlockDefinition):
+class TelephonyBlock(BlockDefinition):
     """Receive OVH calls through an existing Asterisk ARI application."""
 
-    kind = "telephony_in"
+    kind = "telephony"
 
     def render_node_card(self, *, node: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Render the canvas card using the shared node head, title and preview chrome."""
@@ -419,9 +584,9 @@ class TelephonyInBlock(BlockDefinition):
             replacements={
                 "title": node.get("title") or self.default_title(),
                 "ari_target": f"ARI · {values['ari_app']}",
-                "capture": "Audio + événements" if values["capture_audio"] else "Événements seuls",
+                "capture": "Voix + événements" if values["capture_audio"] else "Événements seuls",
             },
-            node_classes=["telephony-in-node"],
+            node_classes=["telephony-node"],
         )
 
     def _ui_replacements(self, values: Mapping[str, Any], warning: str) -> dict[str, str]:
@@ -476,7 +641,7 @@ class TelephonyInBlock(BlockDefinition):
             replacements={
                 **self._ui_replacements(values, warning),
                 "node_icon": "TEL",
-                "node_kind": "Telephony In",
+                "node_kind": "Telephony",
                 "node_tag": "Source",
             },
         )
@@ -514,9 +679,9 @@ class TelephonyInBlock(BlockDefinition):
             if context.runtime_mode == "zeromq_active":
                 _secret(context, config_value["ari_password_ref"])
             if context.runtime_mode == "zeromq_active" and config_value["capture_audio"] and shutil.which("ffmpeg") is None:
-                raise TelephonyInError("FFmpeg est requis pour publier l'audio d'appel.")
+                raise TelephonyError("FFmpeg est requis pour publier l'audio d'appel.")
             return BlockRuntimeResult(last_message="Attente d'appels Asterisk.", content_type=TEXT_PLAIN,
-                                      metadata={"telephony_in": {"state": "waiting", "ari_app": config_value["ari_app"]}})
+                                      metadata={"telephony": {"state": "waiting", "ari_app": config_value["ari_app"]}})
         except Exception as exc:
             return _failure(exc)
 
@@ -526,7 +691,7 @@ class TelephonyInBlock(BlockDefinition):
         try:
             config_value = config(context.config)
             self._ports(context)
-            metadata = {"telephony_in": {"state": "listening" if context.runtime_mode == "zeromq_active" else "simulation",
+            metadata = {"telephony": {"state": "listening" if context.runtime_mode == "zeromq_active" else "simulation",
                                          "ari_app": config_value["ari_app"]}}
             message = "Passerelle téléphonie active." if context.runtime_mode == "zeromq_active" else "Flux audio indisponible en simulation ; écoute Active Runtime requise."
             return BlockRuntimeResult(status="success" if context.runtime_mode == "zeromq_active" else "skipped",
@@ -551,36 +716,108 @@ class TelephonyInBlock(BlockDefinition):
         try:
             from websockets.asyncio.client import connect
         except ImportError as exc:
-            raise TelephonyInError("Dépendance manquante : websockets==15.0.1.") from exc
+            raise TelephonyError("Dépendance manquante : websockets==15.0.1.") from exc
         password = _secret(context, config_value["ari_password_ref"])
         client = _AriClient(config_value, password)
         audio = context.services.get("runtime_audio_streams")
         if not config_value["capture_audio"]:
             audio = None
         if config_value["capture_audio"] and (audio is None or not getattr(audio, "available", False)):
-            raise TelephonyInError("Reliez audio_out à un consommateur audio compatible.")
+            raise TelephonyError("Reliez audio_out à un consommateur audio compatible.")
+        playback = _Playback() if config_value["capture_audio"] else None
+        intake = (asyncio.create_task(self._playback_intake(context, audio, playback))
+                  if playback is not None else None)
+        try:
+            await self._connection_loop(connect, context, client, config_value, audio, playback)
+        finally:
+            if intake is not None:
+                intake.cancel()
+                try:
+                    await intake
+                except asyncio.CancelledError:
+                    pass
+            if playback is not None:
+                await playback.reset()
+
+    async def _connection_loop(self, connect: Any, context: BlockRuntimeListenerContext, client: "_AriClient",
+                               config_value: dict[str, Any], audio: Any,
+                               playback: "_Playback | None") -> None:
+        """Reconnect to ARI until the runtime stops, owning one session set per connection.
+
+        Args:
+            connect: WebSocket client factory.
+            context: Listener context owning the stop signal and result sink.
+            client: Authenticated ARI HTTP client.
+            config_value: Validated configuration for this listener.
+            audio: Runtime audio stream client, or None when capture is disabled.
+            playback: Shared playback buffer, or None when capture is disabled.
+        """
+
         delay = 0.0
         while not context.stop_requested():
             sessions: dict[str, _MediaSession] = {}
             try:
-                await self._ari_session(connect, context, client, config_value, sessions, audio)
+                await self._ari_session(connect, context, client, config_value, sessions, audio, playback)
                 delay = 0.0
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 delay = min(RECONNECT_MAX_DELAY, delay * 2 or RECONNECT_MIN_DELAY)
-                detail = str(error) if isinstance(error, TelephonyInError) else "Connexion Asterisk ARI perdue."
+                detail = str(error) if isinstance(error, TelephonyError) else "Connexion Asterisk ARI perdue."
                 context.emit_result(BlockRuntimeResult(
                     last_message=f"{detail} Nouvelle tentative dans {delay:.0f} s.", content_type=TEXT_PLAIN,
-                    metadata={"telephony_in": {"state": "reconnecting", "ari_app": config_value["ari_app"],
-                                               "retry_in_sec": round(delay, 1)}}))
+                    metadata={"telephony": {"state": "reconnecting", "ari_app": config_value["ari_app"],
+                                            "retry_in_sec": round(delay, 1)}}))
             finally:
                 await self._release_sessions(context, client, sessions)
             if delay:
                 await self._wait(context, delay)
 
+    async def _playback_intake(self, context: BlockRuntimeListenerContext, audio: Any,
+                               playback: "_Playback") -> None:
+        """Decode the graph audio wired to ``audio_in`` for as long as the listener runs.
+
+        Frames are drained on a worker thread so the ARI loop and the return RTP cadence
+        keep their own timing. A stop command marked aborted is a barge-in: the buffered
+        answer is dropped immediately instead of being played to its end.
+
+        Args:
+            context: Listener context exposing the stop signal and the command port.
+            audio: Runtime audio stream client bound to the input port.
+            playback: Shared playback buffer feeding the return RTP senders.
+        """
+
+        if audio is None or not getattr(audio, "available", False):
+            return
+        loop = asyncio.get_running_loop()
+        while not context.stop_requested():
+            try:
+                command = context.receive_command(timeout_sec=0)
+            except Exception:
+                command = None
+            if command is not None:
+                payload = getattr(command, "payload", None)
+                if isinstance(payload, Mapping) and str(payload.get("action") or "") == "stop" \
+                        and bool(payload.get("aborted")):
+                    await playback.reset()
+            try:
+                frame = await loop.run_in_executor(
+                    None, lambda: audio.receive_port("audio_in", timeout_sec=0.05))
+            except Exception:
+                await asyncio.sleep(0.05)
+                continue
+            if frame is None:
+                playback.drain()
+                continue
+            try:
+                await playback.feed(frame)
+            except Exception:
+                # A producer sending an unsupported format loses its answer, not the call.
+                await playback.reset()
+
     async def _ari_session(self, connect: Any, context: BlockRuntimeListenerContext, client: "_AriClient",
-                           config_value: dict[str, Any], sessions: dict[str, _MediaSession], audio: Any) -> None:
+                           config_value: dict[str, Any], sessions: dict[str, _MediaSession], audio: Any,
+                           playback: "_Playback | None" = None) -> None:
         """Run one ARI WebSocket session, isolating the failures of a single event.
 
         Args:
@@ -596,7 +833,7 @@ class TelephonyInBlock(BlockDefinition):
                            open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
             await self._apply_event_filter(client, config_value)
             context.emit_result(BlockRuntimeResult(last_message="Connecté à Asterisk ARI.", content_type=TEXT_PLAIN,
-                metadata={"telephony_in": {"state": "connected", "ari_app": config_value["ari_app"]}}))
+                metadata={"telephony": {"state": "connected", "ari_app": config_value["ari_app"]}}))
             audit_deadline = time.monotonic() + SESSION_AUDIT_INTERVAL
             while not context.stop_requested():
                 try:
@@ -611,14 +848,14 @@ class TelephonyInBlock(BlockDefinition):
                 if not isinstance(event, dict):
                     continue
                 try:
-                    await self._handle_event(context, client, config_value, sessions, event, audio)
+                    await self._handle_event(context, client, config_value, sessions, event, audio, playback)
                 except Exception as error:
                     # One malformed event or one transient ARI error concerns one call;
                     # the other calls and the connection keep running.
-                    detail = str(error) if isinstance(error, TelephonyInError) else "Erreur de transport Asterisk."
+                    detail = str(error) if isinstance(error, TelephonyError) else "Erreur de transport Asterisk."
                     context.emit_result(BlockRuntimeResult(
                         last_message=f"Événement Asterisk ignoré : {detail}", content_type=TEXT_PLAIN,
-                        metadata={"telephony_in": {"state": "event_error"}}))
+                        metadata={"telephony": {"state": "event_error"}}))
 
     @staticmethod
     async def _apply_event_filter(client: "_AriClient", config_value: Mapping[str, Any]) -> None:
@@ -702,6 +939,7 @@ class TelephonyInBlock(BlockDefinition):
             rtp_bytes=session.rtp_received_byte_count,
             rtp_return_packets=session.rtp_sent_packet_count,
             rtp_dropped=session.rtp_dropped_packet_count,
+            playback_frames=session.playback_frame_count,
             **extra,
         )))
         await self._release_call(client, session)
@@ -772,7 +1010,8 @@ class TelephonyInBlock(BlockDefinition):
             await asyncio.sleep(min(0.1, remaining))
 
     async def _handle_event(self, context: BlockRuntimeListenerContext, client: "_AriClient",
-                            config_value: dict[str, Any], sessions: dict[str, _MediaSession], event: Mapping[str, Any], audio: Any) -> None:
+                            config_value: dict[str, Any], sessions: dict[str, _MediaSession], event: Mapping[str, Any],
+                            audio: Any, playback: "_Playback | None" = None) -> None:
         """Normalize one ARI event, emit graph data and manage optional media."""
 
         event_type = str(event.get("type") or "")
@@ -794,7 +1033,7 @@ class TelephonyInBlock(BlockDefinition):
                     await client.request("POST", f"/channels/{channel_id}/answer")
                 if config_value["capture_audio"]:
                     reason = "media_setup"
-                    await self._start_media(client, config_value, session, audio)
+                    await self._start_media(client, config_value, session, audio, playback)
                     session.command_started = True
                     context.emit_result(self._command_result({
                         "action": "start", "stream_id": session.call_id,
@@ -807,12 +1046,12 @@ class TelephonyInBlock(BlockDefinition):
                 context.emit_result(self._call_result(_event(
                     "call.failed", channel, call_id=call_id, audio=False, reason=reason
                 )))
-                detail = str(error) if isinstance(error, TelephonyInError) else "Erreur de transport Asterisk."
+                detail = str(error) if isinstance(error, TelephonyError) else "Erreur de transport Asterisk."
                 # A failed call is reported as a call event, not as a failed node result:
                 # the framework stops the worker on the first failed listener result.
                 context.emit_result(BlockRuntimeResult(
                     last_message=f"Appel {call_id} abandonné : {detail}", content_type=TEXT_PLAIN,
-                    metadata={"telephony_in": {"state": "call_failed", "reason": reason}}))
+                    metadata={"telephony": {"state": "call_failed", "reason": reason}}))
             return
         if event_type == "StasisEnd" and channel_id in sessions:
             await self._close_call(context, client, sessions.pop(channel_id), channel)
@@ -849,7 +1088,8 @@ class TelephonyInBlock(BlockDefinition):
         return ((not expected_context or str(dialplan.get("context") or channel.get("context") or "") == expected_context) and
                 (not expected_extension or str(dialplan.get("exten") or channel.get("extension") or "") == expected_extension))
 
-    async def _start_media(self, client: "_AriClient", config_value: Mapping[str, Any], session: _MediaSession, audio: Any) -> None:
+    async def _start_media(self, client: "_AriClient", config_value: Mapping[str, Any], session: _MediaSession,
+                           audio: Any, playback: "_Playback | None" = None) -> None:
         """Attach Asterisk media to a local RTP receiver and Opus encoder."""
 
         loop = asyncio.get_running_loop()
@@ -890,7 +1130,7 @@ class TelephonyInBlock(BlockDefinition):
         # One dedicated sender owns the 20 ms return cadence. Deriving it from inbound
         # packets starves it exactly while the caller speaks, which is when Asterisk and
         # the SIP provider watch for return media before dropping the call.
-        session.cadence_task = asyncio.create_task(self._return_rtp_cadence(session))
+        session.cadence_task = asyncio.create_task(self._return_rtp_cadence(session, playback))
         bridge = await client.request("POST", "/bridges", data={"type": "mixing"})
         session.bridge_id = str(bridge.get("id") or "")
         await client.request("POST", f"/bridges/{session.bridge_id}/addChannel", data={"channel": f"{session.channel_id},{session.external_channel_id}"})
@@ -900,8 +1140,8 @@ class TelephonyInBlock(BlockDefinition):
         session.pump_task = asyncio.create_task(self._pump_media(session, encoder, queue, audio))
 
     @staticmethod
-    def _rtp_silence_packet(session: "_MediaSession", payload_type: int, size: int) -> bytes:
-        """Build one return RTP silence packet using the external-media payload type."""
+    def _rtp_packet(session: "_MediaSession", payload_type: int, payload: bytes) -> bytes:
+        """Build one return RTP packet carrying playback audio or silence."""
 
         marker = 0x00 if session.rtp_marker_sent else 0x80
         header = bytes((
@@ -920,28 +1160,39 @@ class TelephonyInBlock(BlockDefinition):
         ))
         session.rtp_marker_sent = True
         session.rtp_send_sequence = (session.rtp_send_sequence + 1) & 0xffff
-        session.rtp_timestamp += max(1, size // 2)
-        return header + bytes(size)
+        session.rtp_timestamp += max(1, len(payload) // 2)
+        return header + payload
 
     @staticmethod
-    def _send_rtp_silence(session: "_MediaSession", remote_addr: tuple, payload_type: int, size: int) -> None:
-        """Send one valid silence packet and record the send cadence."""
+    def _send_rtp(session: "_MediaSession", remote_addr: tuple, payload_type: int, payload: bytes) -> None:
+        """Send one return packet and record the send cadence.
 
-        if session.transport is None or size <= 0:
+        Args:
+            session: Media session owning the RTP transport and counters.
+            remote_addr: Asterisk address observed or announced for this call.
+            payload_type: Negotiated RTP payload type.
+            payload: Frame to send, playback audio or silence of the same size.
+        """
+
+        if session.transport is None or not payload:
             return
-        session.transport.sendto(TelephonyInBlock._rtp_silence_packet(session, payload_type, size), remote_addr)
+        session.transport.sendto(TelephonyBlock._rtp_packet(session, payload_type, payload), remote_addr)
         session.rtp_sent_packet_count += 1
         session.rtp_last_send = time.monotonic()
 
     @staticmethod
-    async def _return_rtp_cadence(session: "_MediaSession", interval: float = 0.02) -> None:
+    async def _return_rtp_cadence(session: "_MediaSession", playback: "_Playback | None" = None,
+                                  interval: float = 0.02) -> None:
         """Send one return RTP packet every ``interval`` seconds for the whole call.
 
         The cadence is independent of the inbound flow: it starts as soon as the
-        external-media address is known and keeps running while the caller speaks.
+        external-media address is known and keeps running while the caller speaks. It
+        carries playback audio when the graph provides some, and silence otherwise, so
+        the media path stays open between two answers.
 
         Args:
             session: Media session owning the RTP transport and its negotiation state.
+            playback: Decoded graph audio to play, or None when nothing is wired.
             interval: Packet period, one 20 ms slin16 frame by default.
         """
 
@@ -949,8 +1200,13 @@ class TelephonyInBlock(BlockDefinition):
         while not session.stopping:
             if (session.transport is not None and session.rtp_remote_addr is not None
                     and session.rtp_payload_type is not None and session.rtp_payload_size):
-                TelephonyInBlock._send_rtp_silence(
-                    session, session.rtp_remote_addr, session.rtp_payload_type, session.rtp_payload_size
+                size = session.rtp_payload_size
+                frame = playback.take(size) if playback is not None else None
+                if frame is not None:
+                    session.playback_frame_count += 1
+                TelephonyBlock._send_rtp(
+                    session, session.rtp_remote_addr, session.rtp_payload_type,
+                    frame if frame is not None else bytes(size),
                 )
             deadline += interval
             delay = deadline - time.monotonic()
@@ -1019,15 +1275,17 @@ class TelephonyInBlock(BlockDefinition):
         """Protect the fixed event/audio port identities and transports."""
 
         inputs, outputs = tuple(context.input_ports), tuple(context.output_ports)
-        if inputs or len(outputs) != 3:
-            raise TelephonyInError("Telephony In requires no inputs and its three fixed outputs.")
-        expected = {
+        expected_inputs = {(1, "audio_in", "audio_stream"), (2, "command_in", "message")}
+        expected_outputs = {
             (1, "event_out", "message"), (2, "audio_out", "audio_stream"),
             (3, "command_out", "message"),
         }
-        actual = {(p.id, p.name, getattr(p, "transport", "message")) for p in outputs}
-        if actual != expected:
-            raise TelephonyInError("event_out, audio_out and command_out ports must remain unchanged; recreate an altered node.")
+        identity = lambda ports: {(p.id, p.name, getattr(p, "transport", "message")) for p in ports}
+        if identity(outputs) != expected_outputs:
+            raise TelephonyError("event_out, audio_out and command_out ports must remain unchanged; recreate an altered node.")
+        # Playback inputs stay optional: a node that only listens leaves them unconnected.
+        if identity(inputs) != expected_inputs:
+            raise TelephonyError("audio_in and command_in ports must remain unchanged; recreate an altered node.")
 
     @staticmethod
     def _command_result(command: Mapping[str, Any]) -> BlockRuntimeResult:
@@ -1035,7 +1293,7 @@ class TelephonyInBlock(BlockDefinition):
 
         return BlockRuntimeResult(outputs=[BlockRuntimeOutput(port_id=3, port_name="command_out",
             value=json.dumps(command, ensure_ascii=False, separators=(",", ":")), content_type=APPLICATION_JSON)],
-            content_type=APPLICATION_JSON, metadata={"telephony_in": {"command": command.get("action")}})
+            content_type=APPLICATION_JSON, metadata={"telephony": {"command": command.get("action")}})
 
     @staticmethod
     def _call_result(payload: Mapping[str, Any]) -> BlockRuntimeResult:
@@ -1043,7 +1301,7 @@ class TelephonyInBlock(BlockDefinition):
 
         return BlockRuntimeResult(outputs=[BlockRuntimeOutput(port_id=1, port_name="event_out",
             value=json.dumps(payload, ensure_ascii=False, separators=(",", ":")), content_type=APPLICATION_JSON)],
-            content_type=APPLICATION_JSON, metadata={"telephony_in": {"event": payload.get("event")}})
+            content_type=APPLICATION_JSON, metadata={"telephony": {"event": payload.get("event")}})
 
 
 class _AriClient:
@@ -1091,8 +1349,8 @@ class _AriClient:
             except HTTPError as exc:
                 if quiet and exc.code in {404, 409, 410}:
                     return {}
-                raise TelephonyInError(f"Asterisk ARI a refusé la requête ({exc.code}).") from exc
+                raise TelephonyError(f"Asterisk ARI a refusé la requête ({exc.code}).") from exc
             except Exception as exc:
-                raise TelephonyInError("Asterisk ARI est injoignable.") from exc
+                raise TelephonyError("Asterisk ARI est injoignable.") from exc
 
         return await asyncio.get_running_loop().run_in_executor(None, call)

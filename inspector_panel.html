@@ -1,4 +1,4 @@
-<div class="cw-block-inspector telephony-in-ui" data-block-inspector-root data-node-id="{{ node_id }}" data-node-type="{{ node_type }}">
+<div class="cw-block-inspector telephony-ui" data-block-inspector-root data-node-id="{{ node_id }}" data-node-type="{{ node_type }}">
   <div class="inspector-selection {{ summary_hidden }}" data-node-type="{{ node_type }}">
     <div class="inspector-node-card">
       <div class="inspector-node-icon">{{ node_icon }}</div>
@@ -66,7 +66,7 @@
     <span class="group-label">Audio et média</span>
     <label class="checkbox-line" for="{{ node_id }}InspCapture">
       <input id="{{ node_id }}InspCapture" data-block-config-field="capture_audio" data-block-value-type="boolean" type="checkbox" {{ capture_audio_checked }} />
-      <span>Capturer l'audio sur <code>audio_out</code></span>
+      <span>Média bidirectionnel de l'appel</span>
     </label>
     <div class="field-grid">
       <div class="field-group">
@@ -96,12 +96,12 @@
     <div class="ports-editor-section">
       <div class="ports-editor-header"><span class="group-label">Entrées</span></div>
       <div class="ports-editor-list">{{ inputs_html }}</div>
-      <p class="field-hint">Ce bloc est une source : il n'accepte aucune entrée.</p>
+      <p class="field-hint">Facultatives : reliez-les pour faire parler le bloc, laissez-les libres pour une passerelle qui écoute seulement.</p>
     </div>
     <div class="ports-editor-section">
       <div class="ports-editor-header"><span class="group-label">Sorties</span></div>
       <div class="ports-editor-list">{{ outputs_html }}</div>
-      <p class="field-hint">Les trois sorties sont fixes : <code>event_out</code>, <code>audio_out</code> et <code>command_out</code>. Un node dont les ports ont été modifiés doit être recréé.</p>
+      <p class="field-hint">Les ports sont fixes : <code>event_out</code>, <code>audio_out</code> et <code>command_out</code> en sortie, <code>audio_in</code> et <code>command_in</code> en entrée pour répondre à l'appelant. Un node dont les ports ont été modifiés doit être recréé.</p>
     </div>
   </div>
 </div>
