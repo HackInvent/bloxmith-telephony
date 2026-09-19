@@ -68,8 +68,16 @@ _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 RECONNECT_MIN_DELAY = 1.0
 RECONNECT_MAX_DELAY = 30.0
 SESSION_AUDIT_INTERVAL = 15.0
-# 20 ms of the mono 16 kHz signed 16-bit audio Asterisk expects on a slin16 leg.
-PLAYBACK_FRAME_BYTES = 640
+# External media channels have no SDP negotiation, so Asterisk cannot learn that a
+# dynamic payload type means slin16 on the way in: it drops those frames (ASTERISK-28751).
+# The leg therefore uses slin, whose payload type 11 is static and accepted in both
+# directions. Nothing is lost on a telephone call: the trunk itself is 8 kHz.
+MEDIA_FORMAT = "slin"
+MEDIA_SAMPLE_RATE_HZ = 8000
+MEDIA_PAYLOAD_TYPE = 11
+# 20 ms of mono 8 kHz signed 16-bit audio.
+MEDIA_FRAME_BYTES = 320
+PLAYBACK_FRAME_BYTES = MEDIA_FRAME_BYTES
 # Start playing once a small cushion exists, so producer jitter is not audible.
 PLAYBACK_PREBUFFER_FRAMES = 3
 # A forgotten link, or audio arriving with no call, must not grow without bound.
@@ -233,10 +241,10 @@ class _AudioEncoder:
     pending: bytearray = field(default_factory=bytearray)
     output_queue: "asyncio.Queue[bytes | None]" = field(default_factory=asyncio.Queue)
     reader_task: "asyncio.Task[None] | None" = None
-    chunk_size: int = 320  # 10 ms of mono 16 kHz s16be; adjusted on construction.
+    chunk_size: int = 320  # Adjusted on construction from the call sample rate.
 
     def __post_init__(self) -> None:
-        self.chunk_size = max(64, int(32000 * self.chunk_ms / 1000))
+        self.chunk_size = max(64, int(MEDIA_SAMPLE_RATE_HZ * 2 * self.chunk_ms / 1000))
 
     @classmethod
     async def create(cls, chunk_ms: int) -> "_AudioEncoder":
@@ -244,7 +252,7 @@ class _AudioEncoder:
 
         process = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "s16be",
-            "-ar", "16000", "-ac", "1", "-i", "pipe:0", "-c:a", "libopus",
+            "-ar", str(MEDIA_SAMPLE_RATE_HZ), "-ac", "1", "-i", "pipe:0", "-c:a", "libopus",
             "-b:a", "32000", "-page_duration", str(chunk_ms * 1000), "-f", "ogg", "pipe:1",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -329,12 +337,13 @@ class _PlaybackDecoder:
             # Producers publish Ogg pages, which carry their own rate and channel count.
             source = ["-f", "ogg"]
         elif name in {"pcm_s16le", "pcm16", "pcm"}:
-            source = ["-f", "s16le", "-ar", str(int(sample_rate_hz) or 16000), "-ac", str(int(channels) or 1)]
+            source = ["-f", "s16le", "-ar", str(int(sample_rate_hz) or MEDIA_SAMPLE_RATE_HZ),
+                      "-ac", str(int(channels) or 1)]
         else:
             raise TelephonyError(f"Format audio non pris en charge pour la lecture : {codec}.")
         process = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "error", *source, "-i", "pipe:0",
-            "-f", "s16be", "-ar", "16000", "-ac", "1", "pipe:1",
+            "-f", "s16be", "-ar", str(MEDIA_SAMPLE_RATE_HZ), "-ac", "1", "pipe:1",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1114,7 +1123,7 @@ class TelephonyBlock(BlockDefinition):
         session.encoder = encoder
         external = await client.request("POST", "/channels/externalMedia", data={
             "app": config_value["ari_app"], "external_host": f"{config_value['media_host']}:{sock.getsockname()[1]}",
-            "encapsulation": "rtp", "transport": "udp", "connection_type": "client", "format": "slin16",
+            "encapsulation": "rtp", "transport": "udp", "connection_type": "client", "format": MEDIA_FORMAT,
         })
         session.external_channel_id = str(external.get("id") or "")
         external_vars = external.get("channelvars") if isinstance(external.get("channelvars"), dict) else {}
@@ -1122,11 +1131,10 @@ class TelephonyBlock(BlockDefinition):
         asterisk_port = int(external_vars.get("UNICASTRTP_LOCAL_PORT") or 0)
         if asterisk_host and asterisk_port > 0:
             # Start return media immediately instead of waiting for the first inbound RTP packet.
-            # The Asterisk RTP engine fixes payload type 118 for slin16, whose 20 ms frame is
-            # 640 bytes at 16 kHz. Inbound RTP refines both values if this endpoint differs.
+            # Inbound RTP refines both values if this endpoint negotiated something else.
             session.rtp_remote_addr = (asterisk_host, asterisk_port)
-            session.rtp_payload_type = 118
-            session.rtp_payload_size = 640
+            session.rtp_payload_type = MEDIA_PAYLOAD_TYPE
+            session.rtp_payload_size = MEDIA_FRAME_BYTES
         # One dedicated sender owns the 20 ms return cadence. Deriving it from inbound
         # packets starves it exactly while the caller speaks, which is when Asterisk and
         # the SIP provider watch for return media before dropping the call.

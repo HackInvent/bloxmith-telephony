@@ -105,7 +105,7 @@ Changing the app name, capture mode, audio route, or listener declaration requir
 rate, mono or stereo. It matches what the workspace audio producers emit, so the output of a text-to-speech
 block connects to it directly. `command_in` (ID 2) takes that producer's JSON commands.
 
-Incoming audio is decoded to the 16 kHz mono signed linear format Asterisk expects and played on the call's
+Incoming audio is decoded to the 8 kHz mono signed linear format Asterisk expects and played on the call's
 return RTP leg. Playback starts once a short cushion is buffered, so producer jitter is not audible, and the
 leg falls back to silence between two answers, which keeps the media path open.
 
@@ -153,7 +153,7 @@ After Run, the persistent listener connects to Asterisk ARI and declares an even
 
 A dedicated sender then returns standards-compliant 20 ms RTP for the whole call, at its own pace and independently of the inbound flow, so the return path never stalls while the caller speaks. It starts from Asterisk's `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT`, then follows the source address, payload type and frame size observed on inbound RTP, as symmetric RTP requires. Each call owns its RTP synchronization source.
 
-Inbound RTP is transcoded from Asterisk's big-endian `slin16` PCM to Opus/Ogg and published through `audio_out`, while audio received on `audio_in` is decoded to `slin16` and carried by that same return sender, which falls back to silence when there is nothing to say. External media channels join the same Stasis application, so Asterisk announces them like inbound calls; the block recognizes its own and ignores them, and `max_calls` therefore counts real callers only. `StasisEnd` drains the capture, publishes the correlated stop command and `call.ended`, and only then releases the Asterisk resources: a cleanup error never costs the audio consumer its stop command or its exact counters.
+Inbound RTP is transcoded from Asterisk's big-endian `slin` PCM to Opus/Ogg and published through `audio_out`, while audio received on `audio_in` is decoded to `slin16` and carried by that same return sender, which falls back to silence when there is nothing to say. External media channels join the same Stasis application, so Asterisk announces them like inbound calls; the block recognizes its own and ignores them, and `max_calls` therefore counts real callers only. `StasisEnd` drains the capture, publishes the correlated stop command and `call.ended`, and only then releases the Asterisk resources: a cleanup error never costs the audio consumer its stop command or its exact counters.
 
 ### Failure handling
 
@@ -188,6 +188,16 @@ OVH_SIP_PROXY=your-ovh-sip-proxy
 
 Then render and apply the Asterisk configuration using the tooling that owns that setup. Do not copy these values into the BloxSmith blueprint or a plain block config. The block only needs local ARI access and the secret reference for the ARI password.
 
+## Call audio format
+
+The external media leg uses `slin`: mono 8 kHz signed linear PCM, RTP payload type `11`, 320 bytes per
+20 ms frame. Wideband `slin16` cannot be used in both directions: Asterisk chooses a dynamic payload type
+for it and, having no SDP negotiation on an external media channel, drops the frames sent back with that
+same type. Nothing is lost on a telephone call, where the trunk itself carries 8 kHz audio.
+
+`audio_out` still publishes Opus at 48 kHz, which is what the workspace audio consumers expect, and
+`audio_in` accepts any rate and resamples.
+
 ## Asterisk compatibility
 
 | | Version | Scope |
@@ -204,8 +214,11 @@ The block depends on three Asterisk behaviors:
 - the `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT` channel variables set by `chan_rtp`, which
   give the address the block must send return RTP to;
 - the `eventFilter` application resource, used to subscribe to two event types only; it is optional, so an older or restricted server still works;
-- the `slin16` format, whose RTP payload type `118` is fixed in the Asterisk RTP engine for 16 kHz signed
-  linear audio. The block starts from that value and then follows the payload type observed on inbound RTP.
+- the `slin` format and its static RTP payload type `11`. External media channels have no SDP
+  negotiation, so Asterisk cannot learn that a dynamic payload type means `slin16` on the way in and
+  silently drops those frames ([ASTERISK-28751](https://issues-archive.asterisk.org/ASTERISK-28751)).
+  A static payload type is accepted in both directions. The block starts from that value and then
+  follows what inbound RTP actually carries.
 
 Asterisk 20 is an LTS release: its bug-fix support ends in October 2026 and its security support in
 October 2027. Asterisk 22 is the current LTS. Moving to another Asterisk version requires a new test run,

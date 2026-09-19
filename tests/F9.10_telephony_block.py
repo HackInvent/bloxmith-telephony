@@ -119,6 +119,9 @@ def test_contract_config_ports_ui():
     altered.input_ports = (SimpleNamespace(id=1, name="wrong", transport="audio_stream"),)
     result = block.execute_runtime(altered)
     assert result.status == "failed" and "audio_in" in result.error
+    from blocs.telephony.block import MEDIA_FORMAT, MEDIA_PAYLOAD_TYPE, MEDIA_FRAME_BYTES
+    # Asterisk drops a dynamic payload type it never negotiated, so the leg stays on slin.
+    assert (MEDIA_FORMAT, MEDIA_PAYLOAD_TYPE, MEDIA_FRAME_BYTES) == ("slin", 11, 320)
     playback_port = next(port for port in block.model["ports"]["inputs"] if port["name"] == "audio_in")
     assert playback_port["transport"] == "audio_stream" and playback_port["required"] is False
     # The playback port must accept what the audio producers of the workspace emit.
@@ -274,14 +277,14 @@ def test_real_opus_encoder():
         raise AssertionError("FFmpeg is required by the telephony audio contract.")
     from blocs.telephony.block import _AudioEncoder
 
-    expected = [int(10000 * math.sin(2 * math.pi * 440 * index / 16000)) for index in range(3200)]
+    expected = [int(10000 * math.sin(2 * math.pi * 440 * index / 8000)) for index in range(1600)]
     pcm = b"".join(sample.to_bytes(2, "big", signed=True) for sample in expected)
 
     async def scenario():
         encoder = await _AudioEncoder.create(20)
         chunks = []
-        for offset in range(0, len(pcm), 640):
-            chunks.extend(await encoder.feed(pcm[offset:offset + 640]))
+        for offset in range(0, len(pcm), 320):
+            chunks.extend(await encoder.feed(pcm[offset:offset + 320]))
         chunks.extend(await encoder.close())
         return b"".join(chunks)
 
@@ -289,7 +292,7 @@ def test_real_opus_encoder():
     assert encoded.startswith(b"OggS"), "Encoder must emit an Ogg container"
     decoded = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "ogg", "-i", "pipe:0",
-         "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"],
+         "-f", "s16le", "-ar", "8000", "-ac", "1", "pipe:1"],
         input=encoded, capture_output=True, timeout=10, check=True,
     ).stdout
     actual = struct.unpack("<%dh" % (len(decoded) // 2), decoded)
@@ -507,7 +510,7 @@ def test_audio_media_attach_publish_and_release():
                 second, _ = await loop.run_in_executor(None, sender.recvfrom, 65536)
                 assert second[1] == 118, "Only the first return RTP packet may set the marker"
                 assert int.from_bytes(second[2:4], "big") == 1
-                assert int.from_bytes(second[4:8], "big") == 320, "slin16 timestamps advance by one sample per byte pair"
+                assert int.from_bytes(second[4:8], "big") == 320, "Timestamps advance by one sample per byte pair"
 
                 keepalive, _ = await loop.run_in_executor(None, sender.recvfrom, 65536)
                 assert keepalive[1] == 118 and int.from_bytes(keepalive[2:4], "big") == 2, \
@@ -568,11 +571,11 @@ def test_proactive_rtp_before_inbound_media():
                 loop = asyncio.get_running_loop()
                 first, _ = await loop.run_in_executor(None, asterisk_media.recvfrom, 65536)
                 assert first[0] & 0xc0 == 0x80
-                assert first[1] == 0x80 | 118, "Proactive slin16 RTP uses payload type 118"
-                assert len(first) == 652, "Proactive RTP sends one 20 ms slin16 frame"
+                assert first[1] == 0x80 | 11, "Proactive slin RTP uses the static payload type 11"
+                assert len(first) == 332, "Proactive RTP sends one 20 ms slin frame"
                 second, _ = await loop.run_in_executor(None, asterisk_media.recvfrom, 65536)
-                assert second[1] == 118, "Only the first proactive RTP packet sets the marker"
-                assert int.from_bytes(second[4:8], "big") == 320
+                assert second[1] == 11, "Only the first proactive RTP packet sets the marker"
+                assert int.from_bytes(second[4:8], "big") == 160
             finally:
                 module._AudioEncoder = original
                 await session.close()
@@ -607,7 +610,7 @@ def test_return_rtp_cadence_survives_inbound_audio():
                 inbound_addr = session.transport.get_extra_info("socket").getsockname()
                 # One 20 ms slin16 frame, delivered far faster than the 20 ms return period so
                 # the media pump never observes an idle queue.
-                frame = bytes((0x80, 118, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1)) + bytes(640)
+                frame = bytes((0x80, 11, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1)) + bytes(320)
                 returned, deadline = 0, time.monotonic() + 0.3
                 while time.monotonic() < deadline:
                     # Asterisk sends and receives on one socket; the block answers the
@@ -937,8 +940,8 @@ def test_graph_audio_is_played_to_the_caller():
                 await block._start_media(client, settings, session, audio, playback)
                 loop = asyncio.get_running_loop()
                 packet, _ = await loop.run_in_executor(None, asterisk_media.recvfrom, 65536)
-                assert packet[12:] == answer[:640], "The return leg must carry the graph audio"
-                assert packet[1] & 0x7f == 118, "Playback keeps the negotiated payload type"
+                assert packet[12:] == answer[:320], "The return leg must carry the graph audio"
+                assert packet[1] & 0x7f == 11, "Playback keeps the negotiated payload type"
                 await until_async(lambda: session.playback_frame_count >= 1, "Playback was not counted")
             finally:
                 module._AudioEncoder = original
@@ -975,15 +978,15 @@ def test_playback_decodes_a_producer_stream():
                 payload=encoded[offset:offset + 4096]))
         async def decoded_enough():
             playback.drain()
-            return len(playback.buffer) >= 640 * 3
+            return len(playback.buffer) >= 320 * 3
 
         end = time.monotonic() + 5
         while time.monotonic() < end and not await decoded_enough():
             await asyncio.sleep(0.02)
-        assert len(playback.buffer) >= 640 * 3, "Nothing was decoded for playback"
-        frame = playback.take(640)
-        assert frame is not None and len(frame) == 640, "Decoded audio must be served as 20 ms frames"
-        assert frame != bytes(640), "Decoded playback must not be silence"
+        assert len(playback.buffer) >= 320 * 3, "Nothing was decoded for playback"
+        frame = playback.take(320)
+        assert frame is not None and len(frame) == 320, "Decoded audio must be served as 20 ms frames"
+        assert frame != bytes(320), "Decoded playback must not be silence"
         await playback.reset()
 
     asyncio.run(scenario())
