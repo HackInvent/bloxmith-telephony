@@ -1344,8 +1344,10 @@ class _AriClient:
                               data=payload, headers=headers)
             try:
                 with urlopen(request, timeout=5) as response:
-                    body = response.read()
-                    return json.loads(body) if body else {}
+                    # Never rebind `body`: assigning it here would make the JSON body
+                    # parameter local to this function and unreadable above.
+                    content = response.read()
+                    return json.loads(content) if content else {}
             except HTTPError as exc:
                 if quiet and exc.code in {404, 409, 410}:
                     return {}

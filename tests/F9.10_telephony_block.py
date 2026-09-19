@@ -989,6 +989,87 @@ def test_playback_decodes_a_producer_stream():
     asyncio.run(scenario())
 
 
+def test_ari_client_talks_to_a_real_server():
+    """FB3/FB9: the ARI client performs real requests, with and without a JSON body.
+
+    Every other test fakes this client, so a defect here reaches production unseen:
+    one regression made every ARI call fail before any HTTP traffic happened.
+    """
+    from blocs.telephony.block import _AriClient, TelephonyError
+    import http.server
+    import threading
+
+    received = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _serve(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            received.append({
+                "method": self.command, "path": self.path,
+                "content_type": self.headers.get("Content-Type"),
+                "body": self.rfile.read(length) if length else b"",
+                "authorization": self.headers.get("Authorization"),
+            })
+            if "missing" in self.path:
+                self.send_error(404)
+                return
+            if "broken" in self.path:
+                self.send_error(500)
+                return
+            payload = json.dumps({"id": "channel-1"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        do_GET = do_PUT = do_POST = do_DELETE = _serve
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    client = _AriClient(config({**DEFAULTS, "ari_password_ref": REF,
+                                "ari_base_url": f"http://{host}:{port}"}), "secret")
+
+    async def scenario():
+        assert (await client.request("POST", "/channels/abc/answer"))["id"] == "channel-1"
+        await client.request("PUT", "/applications/bloxsmith/eventFilter",
+                             body={"allowed": [{"type": "StasisStart"}]})
+        assert await client.request("DELETE", "/channels/missing", quiet=True) == {}
+        for path, expected in (("/channels/missing", "404"), ("/channels/broken", "500")):
+            try:
+                await client.request("POST", path)
+            except TelephonyError as error:
+                assert expected in str(error)
+            else:
+                raise AssertionError(f"{path} must report the ARI status")
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    answer, event_filter = received[0], received[1]
+    assert answer["method"] == "POST" and answer["path"] == "/ari/channels/abc/answer"
+    assert answer["authorization"].startswith("Basic ") and not answer["body"]
+    assert event_filter["content_type"] == "application/json"
+    assert json.loads(event_filter["body"]) == {"allowed": [{"type": "StasisStart"}]}
+
+    unreachable = _AriClient(config({**DEFAULTS, "ari_password_ref": REF,
+                                     "ari_base_url": "http://127.0.0.1:1"}), "secret")
+    try:
+        asyncio.run(unreachable.request("GET", "/channels"))
+    except TelephonyError as error:
+        assert "injoignable" in str(error)
+    else:
+        raise AssertionError("An unreachable ARI service must be reported as such")
+
+
 def main():
     test_contract_config_ports_ui()
     test_ui_surfaces_expose_every_setting()
@@ -1006,6 +1087,7 @@ def main():
     test_missed_end_event_is_recovered_by_the_audit()
     test_encoder_failure_keeps_the_call_alive()
     test_event_filter_is_declared_and_optional()
+    test_ari_client_talks_to_a_real_server()
     test_graph_audio_is_played_to_the_caller()
     test_playback_decodes_a_producer_stream()
     test_rtp_payload_skips_extension_header()
