@@ -100,13 +100,13 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     """Return one bounded integer, accepting only integral numeric text."""
 
     if isinstance(value, bool):
-        raise TelephonyError("Les valeurs numériques doivent être des entiers.")
+        raise TelephonyError("Numeric settings must be whole numbers.")
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise TelephonyError("Les valeurs numériques doivent être des entiers.") from exc
+        raise TelephonyError("Numeric settings must be whole numbers.") from exc
     if not minimum <= parsed <= maximum:
-        raise TelephonyError(f"Valeur hors limites : {minimum} à {maximum}.")
+        raise TelephonyError(f"Value out of range: {minimum} to {maximum}.")
     return parsed
 
 
@@ -114,7 +114,7 @@ def _boolean(value: Any, label: str) -> bool:
     """Require a real boolean so imported string settings cannot become truthy."""
 
     if type(value) is not bool:
-        raise TelephonyError(f"{label} doit être un booléen.")
+        raise TelephonyError(f"{label} must be a boolean.")
     return value
 
 
@@ -125,7 +125,7 @@ def _optional_token(value: Any, label: str) -> str:
     if not text:
         return ""
     if len(text) > 128 or not _TOKEN.fullmatch(text):
-        raise TelephonyError(f"{label} contient des caractères non autorisés.")
+        raise TelephonyError(f"{label} contains unsupported characters.")
     return text
 
 
@@ -166,16 +166,16 @@ def _allowed_callers(value: Any) -> str:
     if not text:
         return ""
     if len(text) > MAX_ALLOWED_CALLERS_CHARS:
-        raise TelephonyError("La liste des numéros autorisés est trop longue.")
+        raise TelephonyError("The allowed caller list is too long.")
     numbers: list[str] = []
     for entry in caller_entries(text):
         number = caller_number(entry)
         if not _CALLER.fullmatch(number):
-            raise TelephonyError(f"Numéro appelant invalide : {entry}")
+            raise TelephonyError(f"Invalid caller number: {entry}")
         if number not in numbers:
             numbers.append(number)
     if len(numbers) > MAX_ALLOWED_CALLERS:
-        raise TelephonyError(f"Au maximum {MAX_ALLOWED_CALLERS} numéros autorisés.")
+        raise TelephonyError(f"At most {MAX_ALLOWED_CALLERS} allowed callers.")
     return ", ".join(numbers)
 
 
@@ -222,26 +222,26 @@ def config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     source = raw if isinstance(raw, Mapping) else {}
     base = str(source.get("ari_base_url") or DEFAULTS["ari_base_url"]).strip().rstrip("/")
     if not base.startswith(("http://", "https://")) or any(c.isspace() for c in base):
-        raise TelephonyError("L'URL ARI doit être une adresse HTTP ou HTTPS valide.")
+        raise TelephonyError("The ARI URL must be a valid HTTP or HTTPS address.")
     username = str(source.get("ari_username") or DEFAULTS["ari_username"]).strip()
     if not username or len(username) > 128 or any(c in username for c in "\r\n"):
-        raise TelephonyError("Nom d'utilisateur ARI invalide.")
+        raise TelephonyError("Invalid ARI user name.")
     password_ref = str(source.get("ari_password_ref") or "").strip()
     if len(password_ref) > 256 or any(c in password_ref for c in "\r\n"):
-        raise TelephonyError("Référence du secret ARI invalide.")
-    app = _optional_token(source.get("ari_app", DEFAULTS["ari_app"]), "L'application ARI")
+        raise TelephonyError("Invalid ARI secret reference.")
+    app = _optional_token(source.get("ari_app", DEFAULTS["ari_app"]), "The ARI application")
     if not app:
-        raise TelephonyError("L'application ARI est obligatoire.")
+        raise TelephonyError("The ARI application is required.")
     media_host = str(source.get("media_host") or DEFAULTS["media_host"]).strip()
     if not media_host or len(media_host) > 253 or any(c.isspace() for c in media_host):
-        raise TelephonyError("Hôte média invalide.")
+        raise TelephonyError("Invalid media host.")
     return {
         "ari_base_url": base,
         "ari_username": username,
         "ari_password_ref": password_ref,
         "ari_app": app,
-        "expected_context": _optional_token(source.get("expected_context"), "Le contexte"),
-        "expected_extension": _optional_token(source.get("expected_extension"), "L'extension"),
+        "expected_context": _optional_token(source.get("expected_context"), "The context"),
+        "expected_extension": _optional_token(source.get("expected_extension"), "The extension"),
         "allowed_callers": _allowed_callers(source.get("allowed_callers")),
         "auto_answer": _boolean(source.get("auto_answer", DEFAULTS["auto_answer"]), "auto_answer"),
         "capture_audio": _boolean(source.get("capture_audio", DEFAULTS["capture_audio"]), "capture_audio"),
@@ -280,13 +280,13 @@ def _secret(context: Any, value_ref: str) -> str:
 
     resolver = context.services.get("resolve_secret")
     if not callable(resolver):
-        raise TelephonyError("Résolveur de secrets indisponible dans ce runtime.")
+        raise TelephonyError("No secret resolver is available in this runtime.")
     try:
         value = resolver(value_ref)
     except Exception as exc:
-        raise TelephonyError("Secret ARI inaccessible : déverrouillez le coffre.") from exc
+        raise TelephonyError("The ARI secret is unreachable: unlock the vault.") from exc
     if not isinstance(value, str) or not value.strip() or any(c in value for c in "\r\n"):
-        raise TelephonyError("Le secret ARI est vide ou invalide.")
+        raise TelephonyError("The ARI secret is empty or invalid.")
     return value.strip()
 
 
@@ -312,7 +312,7 @@ def _event(event_name: str, channel: Mapping[str, Any], **extra: Any) -> dict[st
 def _failure(error: Exception) -> BlockRuntimeResult:
     """Return a redacted runtime failure for non block-owned exceptions."""
 
-    message = str(error) if isinstance(error, TelephonyError) else "Erreur de transport Asterisk ou de flux média."
+    message = str(error) if isinstance(error, TelephonyError) else "Asterisk transport or media stream error."
     return BlockRuntimeResult(status="failed", error=message, last_message=message, content_type=TEXT_PLAIN,
                               metadata={"telephony": {"state": "error"}})
 
@@ -391,7 +391,7 @@ class _AudioEncoder:
                 await self.reader_task
             await self.process.wait()
             if self.process.returncode not in {None, 0}:
-                raise TelephonyError("FFmpeg n'a pas pu encoder l'audio d'appel.")
+                raise TelephonyError("FFmpeg could not encode the call audio.")
         except ProcessLookupError:
             pass
         return chunks
@@ -426,7 +426,7 @@ class _PlaybackDecoder:
             source = ["-f", "s16le", "-ar", str(int(sample_rate_hz) or MEDIA_SAMPLE_RATE_HZ),
                       "-ac", str(int(channels) or 1)]
         else:
-            raise TelephonyError(f"Format audio non pris en charge pour la lecture : {codec}.")
+            raise TelephonyError(f"Unsupported playback audio format: {codec}.")
         process = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "error", *source, "-i", "pipe:0",
             "-f", "s16be", "-ar", str(MEDIA_SAMPLE_RATE_HZ), "-ac", "1", "pipe:1",
@@ -679,7 +679,7 @@ class TelephonyBlock(BlockDefinition):
             replacements={
                 "title": node.get("title") or self.default_title(),
                 "ari_target": f"ARI · {values['ari_app']}",
-                "capture": "Voix + événements" if values["capture_audio"] else "Événements seuls",
+                "capture": "Voice + events" if values["capture_audio"] else "Events only",
             },
             node_classes=["telephony-node"],
         )
@@ -716,7 +716,7 @@ class TelephonyBlock(BlockDefinition):
             "auto_answer_checked": "checked" if values.get("auto_answer") else "",
             "capture_audio_checked": "checked" if values.get("capture_audio") else "",
             "config_warning": (
-                f'<p class="field-hint is-error">{escape(warning)} Corrigez la valeur puis appliquez.</p>'
+                f'<p class="field-hint is-error">{escape(warning)} Correct the value, then apply.</p>'
                 if warning else ""
             ),
         }
@@ -776,8 +776,8 @@ class TelephonyBlock(BlockDefinition):
             if context.runtime_mode == "zeromq_active":
                 _secret(context, config_value["ari_password_ref"])
             if context.runtime_mode == "zeromq_active" and config_value["capture_audio"] and shutil.which("ffmpeg") is None:
-                raise TelephonyError("FFmpeg est requis pour publier l'audio d'appel.")
-            return BlockRuntimeResult(last_message="Attente d'appels Asterisk.", content_type=TEXT_PLAIN,
+                raise TelephonyError("FFmpeg is required to publish call audio.")
+            return BlockRuntimeResult(last_message="Waiting for Asterisk calls.", content_type=TEXT_PLAIN,
                                       metadata={"telephony": {"state": "waiting", "ari_app": config_value["ari_app"]}})
         except Exception as exc:
             return _failure(exc)
@@ -790,7 +790,7 @@ class TelephonyBlock(BlockDefinition):
             self._ports(context)
             metadata = {"telephony": {"state": "listening" if context.runtime_mode == "zeromq_active" else "simulation",
                                          "ari_app": config_value["ari_app"]}}
-            message = "Passerelle téléphonie active." if context.runtime_mode == "zeromq_active" else "Flux audio indisponible en simulation ; écoute Active Runtime requise."
+            message = "Telephony gateway active." if context.runtime_mode == "zeromq_active" else "Audio streaming is unavailable in simulation; Active Runtime listening is required."
             return BlockRuntimeResult(status="success" if context.runtime_mode == "zeromq_active" else "skipped",
                                       last_message=message, content_type=TEXT_PLAIN, metadata=metadata)
         except Exception as exc:
@@ -813,14 +813,14 @@ class TelephonyBlock(BlockDefinition):
         try:
             from websockets.asyncio.client import connect
         except ImportError as exc:
-            raise TelephonyError("Dépendance manquante : websockets==15.0.1.") from exc
+            raise TelephonyError("Missing dependency: websockets==15.0.1.") from exc
         password = _secret(context, config_value["ari_password_ref"])
         client = _AriClient(config_value, password)
         audio = context.services.get("runtime_audio_streams")
         if not config_value["capture_audio"]:
             audio = None
         if config_value["capture_audio"] and (audio is None or not getattr(audio, "available", False)):
-            raise TelephonyError("Reliez audio_out à un consommateur audio compatible.")
+            raise TelephonyError("Wire audio_out to a compatible audio consumer.")
         playback = _Playback() if config_value["capture_audio"] else None
         intake = (asyncio.create_task(self._playback_intake(context, audio, playback))
                   if playback is not None else None)
@@ -860,9 +860,9 @@ class TelephonyBlock(BlockDefinition):
                 raise
             except Exception as error:
                 delay = min(RECONNECT_MAX_DELAY, delay * 2 or RECONNECT_MIN_DELAY)
-                detail = str(error) if isinstance(error, TelephonyError) else "Connexion Asterisk ARI perdue."
+                detail = str(error) if isinstance(error, TelephonyError) else "Asterisk ARI connection lost."
                 context.emit_result(BlockRuntimeResult(
-                    last_message=f"{detail} Nouvelle tentative dans {delay:.0f} s.", content_type=TEXT_PLAIN,
+                    last_message=f"{detail} Retrying in {delay:.0f} s.", content_type=TEXT_PLAIN,
                     metadata={"telephony": {"state": "reconnecting", "ari_app": config_value["ari_app"],
                                             "retry_in_sec": round(delay, 1)}}))
             finally:
@@ -929,7 +929,7 @@ class TelephonyBlock(BlockDefinition):
         async with connect(client.websocket_url(), additional_headers={"Authorization": client.authorization},
                            open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
             await self._apply_event_filter(client, config_value)
-            context.emit_result(BlockRuntimeResult(last_message="Connecté à Asterisk ARI.", content_type=TEXT_PLAIN,
+            context.emit_result(BlockRuntimeResult(last_message="Connected to Asterisk ARI.", content_type=TEXT_PLAIN,
                 metadata={"telephony": {"state": "connected", "ari_app": config_value["ari_app"]}}))
             audit_deadline = time.monotonic() + SESSION_AUDIT_INTERVAL
             while not context.stop_requested():
@@ -949,9 +949,9 @@ class TelephonyBlock(BlockDefinition):
                 except Exception as error:
                     # One malformed event or one transient ARI error concerns one call;
                     # the other calls and the connection keep running.
-                    detail = str(error) if isinstance(error, TelephonyError) else "Erreur de transport Asterisk."
+                    detail = str(error) if isinstance(error, TelephonyError) else "Asterisk transport error."
                     context.emit_result(BlockRuntimeResult(
-                        last_message=f"Événement Asterisk ignoré : {detail}", content_type=TEXT_PLAIN,
+                        last_message=f"Asterisk event skipped: {detail}", content_type=TEXT_PLAIN,
                         metadata={"telephony": {"state": "event_error"}}))
 
     @staticmethod
@@ -1143,11 +1143,11 @@ class TelephonyBlock(BlockDefinition):
                 context.emit_result(self._call_result(_event(
                     "call.failed", channel, call_id=call_id, audio=False, reason=reason
                 )))
-                detail = str(error) if isinstance(error, TelephonyError) else "Erreur de transport Asterisk."
+                detail = str(error) if isinstance(error, TelephonyError) else "Asterisk transport error."
                 # A failed call is reported as a call event, not as a failed node result:
                 # the framework stops the worker on the first failed listener result.
                 context.emit_result(BlockRuntimeResult(
-                    last_message=f"Appel {call_id} abandonné : {detail}", content_type=TEXT_PLAIN,
+                    last_message=f"Call {call_id} dropped: {detail}", content_type=TEXT_PLAIN,
                     metadata={"telephony": {"state": "call_failed", "reason": reason}}))
             return
         if event_type == "StasisEnd" and channel_id in sessions:
@@ -1450,8 +1450,8 @@ class _AriClient:
             except HTTPError as exc:
                 if quiet and exc.code in {404, 409, 410}:
                     return {}
-                raise TelephonyError(f"Asterisk ARI a refusé la requête ({exc.code}).") from exc
+                raise TelephonyError(f"Asterisk ARI refused the request ({exc.code}).") from exc
             except Exception as exc:
-                raise TelephonyError("Asterisk ARI est injoignable.") from exc
+                raise TelephonyError("Asterisk ARI is unreachable.") from exc
 
         return await asyncio.get_running_loop().run_in_executor(None, call)

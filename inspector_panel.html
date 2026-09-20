@@ -9,73 +9,73 @@
       <span class="inspector-node-tag">{{ node_tag }}</span>
     </div>
     <div class="inspector-tabs">
-      <button class="inspector-tab {{ general_active }}" data-inspector-tab="general" type="button">Général</button>
+      <button class="inspector-tab {{ general_active }}" data-inspector-tab="general" type="button">General</button>
       <button class="inspector-tab {{ ports_active }}" data-inspector-tab="ports" type="button">Ports</button>
     </div>
   </div>
 
   <div class="inspector-view {{ general_hidden }}" data-inspector-panel-tab="general">
     <div class="field-group {{ title_hidden }}">
-      <label for="{{ node_id }}InspName">Nom du node</label>
+      <label for="{{ node_id }}InspName">Node name</label>
       <input id="{{ node_id }}InspName" data-node-title-input type="text" placeholder="{{ node_title_placeholder }}" value="{{ node_title }}" />
     </div>
 
     {{ config_warning }}
 
-    <span class="group-label">Connexion ARI</span>
+    <span class="group-label">ARI connection</span>
     <div class="field-group">
-      <label for="{{ node_id }}InspUrl">URL du service ARI</label>
+      <label for="{{ node_id }}InspUrl">ARI service URL</label>
       <input id="{{ node_id }}InspUrl" data-block-config-field="ari_base_url" type="text" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:8088" value="{{ ari_base_url }}" />
     </div>
     <div class="field-grid">
       <div class="field-group">
-        <label for="{{ node_id }}InspUser">Utilisateur</label>
+        <label for="{{ node_id }}InspUser">User</label>
         <input id="{{ node_id }}InspUser" data-block-config-field="ari_username" type="text" autocomplete="off" spellcheck="false" value="{{ ari_username }}" />
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}InspApp">Application Stasis</label>
+        <label for="{{ node_id }}InspApp">Stasis application</label>
         <input id="{{ node_id }}InspApp" data-block-config-field="ari_app" type="text" autocomplete="off" spellcheck="false" value="{{ ari_app }}" />
       </div>
     </div>
     <div class="field-group">
-      <label for="{{ node_id }}InspSecret">Référence du secret ARI</label>
+      <label for="{{ node_id }}InspSecret">ARI secret reference</label>
       <input id="{{ node_id }}InspSecret" data-block-config-field="ari_password_ref" type="text" autocomplete="off" spellcheck="false" placeholder="secret://workspace/asterisk_secret" value="{{ ari_password_ref }}" />
-      <p class="field-hint">Référence vers le coffre, jamais le mot de passe. Videz le champ pour la retirer.</p>
+      <p class="field-hint">A reference into the vault, never the password. Clear the field to remove it.</p>
     </div>
 
-    <span class="group-label">Appels entrants</span>
+    <span class="group-label">Inbound calls</span>
     <div class="field-grid">
       <div class="field-group">
-        <label for="{{ node_id }}InspContext">Contexte attendu</label>
-        <input id="{{ node_id }}InspContext" data-block-config-field="expected_context" type="text" autocomplete="off" spellcheck="false" placeholder="Tous" value="{{ expected_context }}" />
+        <label for="{{ node_id }}InspContext">Expected context</label>
+        <input id="{{ node_id }}InspContext" data-block-config-field="expected_context" type="text" autocomplete="off" spellcheck="false" placeholder="Every" value="{{ expected_context }}" />
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}InspExtension">Extension attendue</label>
-        <input id="{{ node_id }}InspExtension" data-block-config-field="expected_extension" type="text" autocomplete="off" spellcheck="false" placeholder="Toutes" value="{{ expected_extension }}" />
+        <label for="{{ node_id }}InspExtension">Expected extension</label>
+        <input id="{{ node_id }}InspExtension" data-block-config-field="expected_extension" type="text" autocomplete="off" spellcheck="false" placeholder="Every" value="{{ expected_extension }}" />
       </div>
     </div>
     <div class="field-group">
-      <label for="{{ node_id }}InspCallers">Numéros autorisés</label>
-      <input id="{{ node_id }}InspCallers" data-block-config-field="allowed_callers" type="text" autocomplete="off" spellcheck="false" placeholder="Tous" value="{{ allowed_callers }}" />
-      <p class="field-hint">Virgule ou point-virgule, au format international. Vide accepte tous les appelants.</p>
+      <label for="{{ node_id }}InspCallers">Allowed callers</label>
+      <input id="{{ node_id }}InspCallers" data-block-config-field="allowed_callers" type="text" autocomplete="off" spellcheck="false" placeholder="Every" value="{{ allowed_callers }}" />
+      <p class="field-hint">Comma or semicolon separated, in international form. Empty accepts every caller.</p>
     </div>
     <div class="field-group">
-      <label for="{{ node_id }}InspMaxCalls">Appels simultanés (1 à 8)</label>
+      <label for="{{ node_id }}InspMaxCalls">Concurrent calls (1 to 8)</label>
       <input id="{{ node_id }}InspMaxCalls" data-block-config-field="max_calls" data-block-value-type="integer" type="number" min="1" max="8" step="1" value="{{ max_calls }}" />
     </div>
     <label class="checkbox-line" for="{{ node_id }}InspAnswer">
       <input id="{{ node_id }}InspAnswer" data-block-config-field="auto_answer" data-block-value-type="boolean" type="checkbox" {{ auto_answer_checked }} />
-      <span>Décrocher automatiquement</span>
+      <span>Answer automatically</span>
     </label>
 
-    <span class="group-label">Audio et média</span>
+    <span class="group-label">Audio and media</span>
     <label class="checkbox-line" for="{{ node_id }}InspCapture">
       <input id="{{ node_id }}InspCapture" data-block-config-field="capture_audio" data-block-value-type="boolean" type="checkbox" {{ capture_audio_checked }} />
-      <span>Média bidirectionnel de l'appel</span>
+      <span>Two-way call media</span>
     </label>
     <div class="field-grid">
       <div class="field-group">
-        <label for="{{ node_id }}InspMediaHost">Hôte média</label>
+        <label for="{{ node_id }}InspMediaHost">Media host</label>
         <input id="{{ node_id }}InspMediaHost" data-block-config-field="media_host" type="text" autocomplete="off" spellcheck="false" value="{{ media_host }}" />
       </div>
       <div class="field-group">
@@ -84,29 +84,29 @@
       </div>
     </div>
     <div class="field-group">
-      <label for="{{ node_id }}InspChunk">Trame encodée (20 à 1000 ms)</label>
+      <label for="{{ node_id }}InspChunk">Encoded frame (20 to 1000 ms)</label>
       <input id="{{ node_id }}InspChunk" data-block-config-field="ffmpeg_chunk_ms" data-block-value-type="integer" type="number" min="20" max="1000" step="10" value="{{ ffmpeg_chunk_ms }}" />
     </div>
 
-    <p class="inspector-copy">Cible actuelle : <strong>{{ ari_target }}</strong>. Les réglages sont pris en compte au prochain démarrage du Run ; les appels en cours gardent leur configuration.</p>
+    <p class="inspector-copy">Current target: <strong>{{ ari_target }}</strong>. Settings are taken into account the next time the Run starts; calls in progress keep their configuration.</p>
 
     <div class="inspector-actions {{ actions_hidden }}">
-      <button class="solid-btn" data-block-apply type="button" disabled>Appliquer</button>
-      <button class="ghost-btn {{ duplicate_hidden }}" data-block-action="duplicate" type="button">Dupliquer</button>
-      <button class="danger-btn {{ delete_hidden }}" data-block-action="delete" type="button">Supprimer</button>
+      <button class="solid-btn" data-block-apply type="button" disabled>Apply</button>
+      <button class="ghost-btn {{ duplicate_hidden }}" data-block-action="duplicate" type="button">Duplicate</button>
+      <button class="danger-btn {{ delete_hidden }}" data-block-action="delete" type="button">Delete</button>
     </div>
   </div>
 
   <div class="inspector-view {{ ports_hidden }}" data-inspector-panel-tab="ports">
     <div class="ports-editor-section">
-      <div class="ports-editor-header"><span class="group-label">Entrées</span></div>
+      <div class="ports-editor-header"><span class="group-label">Inputs</span></div>
       <div class="ports-editor-list">{{ inputs_html }}</div>
-      <p class="field-hint">Facultatives : reliez-les pour faire parler le bloc, laissez-les libres pour une passerelle qui écoute seulement.</p>
+      <p class="field-hint">Optional: wire them to make the block speak, leave them free for a gateway that only listens.</p>
     </div>
     <div class="ports-editor-section">
-      <div class="ports-editor-header"><span class="group-label">Sorties</span></div>
+      <div class="ports-editor-header"><span class="group-label">Outputs</span></div>
       <div class="ports-editor-list">{{ outputs_html }}</div>
-      <p class="field-hint">Les ports sont fixes : <code>event_out</code>, <code>audio_out</code> et <code>command_out</code> en sortie, <code>audio_in</code> et <code>command_in</code> en entrée pour répondre à l'appelant. Un node dont les ports ont été modifiés doit être recréé.</p>
+      <p class="field-hint">The ports are fixed: <code>event_out</code>, <code>audio_out</code> and <code>command_out</code> as outputs, <code>audio_in</code> and <code>command_in</code> as inputs to answer the caller. A node whose ports were altered must be recreated.</p>
     </div>
   </div>
 </div>

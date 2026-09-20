@@ -750,7 +750,7 @@ def test_transient_answer_failure_releases_the_caller():
         async def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
             if args and args[1].endswith("/answer"):
-                raise TelephonyError("Asterisk ARI est injoignable.")
+                raise TelephonyError("Asterisk ARI is unreachable.")
             return {}
 
     block = TelephonyBlock()
@@ -780,7 +780,7 @@ def test_stop_command_survives_a_cleanup_failure():
         async def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
             if args and args[0] == "DELETE":
-                raise TelephonyError("Asterisk ARI est injoignable.")
+                raise TelephonyError("Asterisk ARI is unreachable.")
             return {}
 
     block = TelephonyBlock()
@@ -877,7 +877,7 @@ def test_event_filter_is_declared_and_optional():
     class Refusing(AsyncRequestRecorder):
         async def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
-            raise TelephonyError("Asterisk ARI a refusé la requête (404).")
+            raise TelephonyError("Asterisk ARI refused the request (404).")
 
     block = TelephonyBlock()
     settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": False, "ari_app": "bloxsmith"})
@@ -1068,7 +1068,7 @@ def test_ari_client_talks_to_a_real_server():
     try:
         asyncio.run(unreachable.request("GET", "/channels"))
     except TelephonyError as error:
-        assert "injoignable" in str(error)
+        assert "unreachable" in str(error)
     else:
         raise AssertionError("An unreachable ARI service must be reported as such")
 
@@ -1077,12 +1077,12 @@ def test_caller_filter_accepts_only_the_listed_numbers():
     """FB11: an allowed-caller list is normalized, and it gates the calls that are answered."""
     from blocs.telephony.block import caller_allowed, caller_number
 
-    # Une même ligne s'écrit de plusieurs façons : la comparaison les ramène à une seule.
+    # One line is written in several ways; the comparison reduces them to a single form.
     assert caller_number("+33 6 12.34-56 78") == "+33612345678"
     assert caller_number("0033612345678") == "+33612345678"
     assert caller_number("") == ""
 
-    # La liste accepte virgules, points-virgules, espaces, et retire les doublons.
+    # The list accepts commas, semicolons and spaces, and drops duplicates.
     normalized = config({**DEFAULTS, "ari_password_ref": REF,
                          "allowed_callers": " +33 612 345 678 ; 0033698765432, +33612345678 "})
     assert normalized["allowed_callers"] == "+33612345678, +33698765432"
@@ -1095,14 +1095,14 @@ def test_caller_filter_accepts_only_the_listed_numbers():
         except Exception:
             pass
         else:
-            raise AssertionError(f"Liste invalide acceptée : {invalid[:40]}")
+            raise AssertionError(f"Invalid list accepted: {invalid[:40]}")
 
     allowed = normalized["allowed_callers"]
-    assert caller_allowed("0033612345678", allowed), "Le format 00 doit correspondre au format +"
-    assert caller_allowed("0612345678", allowed), "Le format national doit correspondre à l'international"
-    assert not caller_allowed("+33611111111", allowed), "Un numéro absent de la liste est refusé"
-    assert not caller_allowed("", allowed), "Un appel masqué est refusé quand une liste existe"
-    assert not caller_allowed("345678", allowed), "Un fragment trop court ne doit jamais correspondre"
+    assert caller_allowed("0033612345678", allowed), "The 00 form must match the + form"
+    assert caller_allowed("0612345678", allowed), "A national spelling must match the international one"
+    assert not caller_allowed("+33611111111", allowed), "A number that is not listed is refused"
+    assert not caller_allowed("", allowed), "A withheld caller is refused when a list is set"
+    assert not caller_allowed("345678", allowed), "A fragment that is too short must never match"
 
     block = TelephonyBlock()
     settings = config({**DEFAULTS, "ari_password_ref": REF, "allowed_callers": "+33612345678"})
@@ -1110,7 +1110,7 @@ def test_caller_filter_accepts_only_the_listed_numbers():
     assert block._matches(channel, settings)
     assert not block._matches({**channel, "caller": {"number": "+33600000000"}}, settings)
     assert not block._matches({**channel, "caller": {}}, settings)
-    # Sans liste, le filtre laisse passer tout le monde.
+    # With no list, the filter lets every caller through.
     assert block._matches({**channel, "caller": {}}, config({**DEFAULTS, "ari_password_ref": REF}))
 
 
@@ -1128,8 +1128,8 @@ def test_rejected_caller_never_reaches_the_graph():
         "channel": {"id": "unwanted", "name": "PJSIP/ovh-9", "caller": {"number": "0033699999999"},
                     "dialplan": {}},
     }, None))
-    assert not sessions and not emitted, "Un appelant non autorisé ne doit rien produire"
-    assert not client.requests, "Un appelant non autorisé ne doit jamais être décroché"
+    assert not sessions and not emitted, "A caller that is not allowed must produce nothing"
+    assert not client.requests, "A caller that is not allowed must never be answered"
 
 
 def main():

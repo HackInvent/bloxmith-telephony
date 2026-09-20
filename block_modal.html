@@ -1,106 +1,106 @@
 <div class="modal-panel block-config-modal telephony-ui" role="dialog" aria-modal="true" aria-labelledby="{{ node_id }}TelephonyTitle" data-generic-block-modal-root data-node-id="{{ node_id }}" data-node-kind="{{ node_kind }}">
   <div class="modal-header">
     <div>
-      <span class="panel-kicker">Bloc {{ node_kind_title }}</span>
+      <span class="panel-kicker">{{ node_kind_title }} block</span>
       <h2 id="{{ node_id }}TelephonyTitle">{{ node_title }}</h2>
     </div>
     <div class="modal-actions">
-      <button class="ghost-btn" data-close-block-modal type="button">Fermer</button>
+      <button class="ghost-btn" data-close-block-modal type="button">Close</button>
     </div>
   </div>
 
   <div class="block-config-modal-body">
     <section class="ports-editor-section">
-      <div class="ports-editor-header"><span class="group-label">Connexion ARI</span></div>
+      <div class="ports-editor-header"><span class="group-label">ARI connection</span></div>
       {{ config_warning }}
-      <p class="telephony-summary">Cible actuelle : <strong>{{ ari_target }}</strong></p>
+      <p class="telephony-summary">Current target: <strong>{{ ari_target }}</strong></p>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyName">Nom du bloc</label>
+        <label for="{{ node_id }}TelephonyName">Block name</label>
         <input id="{{ node_id }}TelephonyName" data-block-title-field type="text" autocomplete="off" value="{{ node_title }}" />
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyUrl">URL du service ARI</label>
+        <label for="{{ node_id }}TelephonyUrl">ARI service URL</label>
         <input id="{{ node_id }}TelephonyUrl" data-block-config-field="ari_base_url" type="text" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:8088" value="{{ ari_base_url }}" />
-        <p class="field-hint">Asterisk local, en HTTP ou HTTPS. N'exposez jamais ce port à un réseau non maîtrisé.</p>
+        <p class="field-hint">Local Asterisk, over HTTP or HTTPS. Never expose this port to an untrusted network.</p>
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyUser">Utilisateur ARI</label>
+        <label for="{{ node_id }}TelephonyUser">ARI user</label>
         <input id="{{ node_id }}TelephonyUser" data-block-config-field="ari_username" type="text" autocomplete="off" spellcheck="false" value="{{ ari_username }}" />
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonySecret">Référence du secret ARI</label>
+        <label for="{{ node_id }}TelephonySecret">ARI secret reference</label>
         <input id="{{ node_id }}TelephonySecret" data-block-config-field="ari_password_ref" type="text" autocomplete="off" spellcheck="false" placeholder="secret://workspace/asterisk_secret" value="{{ ari_password_ref }}" />
-        <p class="field-hint">Référence vers le coffre BloxSmith, jamais le mot de passe lui-même. Elle reste visible pour repérer une erreur de saisie ; videz le champ pour la retirer.</p>
+        <p class="field-hint">A reference into the BloxSmith vault, never the password itself. It stays visible so a typo is easy to spot; clear the field to remove it.</p>
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyApp">Application Stasis</label>
+        <label for="{{ node_id }}TelephonyApp">Stasis application</label>
         <input id="{{ node_id }}TelephonyApp" data-block-config-field="ari_app" type="text" autocomplete="off" spellcheck="false" value="{{ ari_app }}" />
-        <p class="field-hint">Doit correspondre à <code>Stasis(...)</code> dans le dialplan Asterisk.</p>
+        <p class="field-hint">Must match <code>Stasis(...)</code> in the Asterisk dialplan.</p>
       </div>
     </section>
 
     <section class="ports-editor-section">
-      <div class="ports-editor-header"><span class="group-label">Appels entrants</span></div>
+      <div class="ports-editor-header"><span class="group-label">Inbound calls</span></div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyContext">Contexte attendu</label>
-        <input id="{{ node_id }}TelephonyContext" data-block-config-field="expected_context" type="text" autocomplete="off" spellcheck="false" placeholder="Tous les contextes" value="{{ expected_context }}" />
+        <label for="{{ node_id }}TelephonyContext">Expected context</label>
+        <input id="{{ node_id }}TelephonyContext" data-block-config-field="expected_context" type="text" autocomplete="off" spellcheck="false" placeholder="Every context" value="{{ expected_context }}" />
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyExtension">Extension attendue</label>
-        <input id="{{ node_id }}TelephonyExtension" data-block-config-field="expected_extension" type="text" autocomplete="off" spellcheck="false" placeholder="Toutes les extensions" value="{{ expected_extension }}" />
-        <p class="field-hint">Laissez vide pour accepter tout appel routé vers l'application Stasis.</p>
+        <label for="{{ node_id }}TelephonyExtension">Expected extension</label>
+        <input id="{{ node_id }}TelephonyExtension" data-block-config-field="expected_extension" type="text" autocomplete="off" spellcheck="false" placeholder="Every extension" value="{{ expected_extension }}" />
+        <p class="field-hint">Leave empty to accept every call routed to the Stasis application.</p>
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyCallers">Numéros autorisés</label>
-        <input id="{{ node_id }}TelephonyCallers" data-block-config-field="allowed_callers" type="text" autocomplete="off" spellcheck="false" placeholder="Tous les appelants" value="{{ allowed_callers }}" />
-        <p class="field-hint">Séparez par une virgule ou un point-virgule, au format international : <code>+33612345678, +33698765432</code>. Vide accepte tout le monde ; sinon, un appel masqué ou absent de la liste est ignoré.</p>
+        <label for="{{ node_id }}TelephonyCallers">Allowed callers</label>
+        <input id="{{ node_id }}TelephonyCallers" data-block-config-field="allowed_callers" type="text" autocomplete="off" spellcheck="false" placeholder="Every caller" value="{{ allowed_callers }}" />
+        <p class="field-hint">Separate with a comma or a semicolon, in international form: <code>+33612345678, +33698765432</code>. Empty accepts everyone; otherwise a withheld caller, or one that is not listed, is ignored.</p>
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyMaxCalls">Appels simultanés</label>
+        <label for="{{ node_id }}TelephonyMaxCalls">Concurrent calls</label>
         <input id="{{ node_id }}TelephonyMaxCalls" data-block-config-field="max_calls" data-block-value-type="integer" type="number" min="1" max="8" step="1" value="{{ max_calls }}" />
-        <p class="field-hint">De 1 à 8. Les appels au-delà de cette limite sont ignorés, pas mis en file.</p>
+        <p class="field-hint">From 1 to 8. Calls beyond this limit are ignored, not queued.</p>
       </div>
       <label class="checkbox-line" for="{{ node_id }}TelephonyAnswer">
         <input id="{{ node_id }}TelephonyAnswer" data-block-config-field="auto_answer" data-block-value-type="boolean" type="checkbox" {{ auto_answer_checked }} />
-        <span>Décrocher automatiquement les appels reconnus</span>
+        <span>Answer matching calls automatically</span>
       </label>
     </section>
 
     <section class="ports-editor-section">
-      <div class="ports-editor-header"><span class="group-label">Audio et média</span></div>
+      <div class="ports-editor-header"><span class="group-label">Audio and media</span></div>
       <label class="checkbox-line" for="{{ node_id }}TelephonyCapture">
         <input id="{{ node_id }}TelephonyCapture" data-block-config-field="capture_audio" data-block-value-type="boolean" type="checkbox" {{ capture_audio_checked }} />
-        <span>Activer le média bidirectionnel de l'appel</span>
+        <span>Enable the two-way call media</span>
       </label>
-      <p class="field-hint">Sans média, seuls les événements d'appel sont publiés. Avec média, la voix de l'appelant sort sur <code>audio_out</code> et ce qui arrive sur <code>audio_in</code> lui est joué. FFmpeg est requis.</p>
+      <p class="field-hint">Without media, only call events are published. With media, the caller's voice leaves on <code>audio_out</code> and whatever arrives on <code>audio_in</code> is played to them. FFmpeg is required.</p>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyMediaHost">Hôte média local</label>
+        <label for="{{ node_id }}TelephonyMediaHost">Local media host</label>
         <input id="{{ node_id }}TelephonyMediaHost" data-block-config-field="media_host" type="text" autocomplete="off" spellcheck="false" value="{{ media_host }}" />
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyMediaPort">Port média local</label>
+        <label for="{{ node_id }}TelephonyMediaPort">Local media port</label>
         <input id="{{ node_id }}TelephonyMediaPort" data-block-config-field="media_port" data-block-value-type="integer" type="number" min="0" max="65535" step="1" value="{{ media_port }}" />
-        <p class="field-hint"><code>0</code> laisse le système choisir un port libre à chaque appel.</p>
+        <p class="field-hint"><code>0</code> lets the system pick a free port for every call.</p>
       </div>
       <div class="field-group">
-        <label for="{{ node_id }}TelephonyChunk">Taille de trame encodée (ms)</label>
+        <label for="{{ node_id }}TelephonyChunk">Encoded frame size (ms)</label>
         <input id="{{ node_id }}TelephonyChunk" data-block-config-field="ffmpeg_chunk_ms" data-block-value-type="integer" type="number" min="20" max="1000" step="10" value="{{ ffmpeg_chunk_ms }}" />
-        <p class="field-hint">De 20 à 1000 ms. Une valeur basse réduit la latence, une valeur haute réduit le nombre de trames publiées.</p>
+        <p class="field-hint">From 20 to 1000 ms. A low value lowers latency, a high one lowers the number of published frames.</p>
       </div>
     </section>
 
     <section class="ports-editor-section">
-      <div class="ports-editor-header"><span class="group-label">Ports et dernier état</span></div>
+      <div class="ports-editor-header"><span class="group-label">Ports and last state</span></div>
       {{ ports_html }}
       {{ runtime_html }}
       {{ error_html }}
-      <p class="inspector-copy">Les ports sont fixes. Reliez <code>audio_out</code> et <code>command_out</code> au même consommateur pour une capture corrélée, et la sortie d'un bloc de synthèse vocale sur <code>audio_in</code> et <code>command_in</code> pour répondre à l'appelant.</p>
+      <p class="inspector-copy">The ports are fixed. Wire <code>audio_out</code> and <code>command_out</code> to the same consumer for a correlated capture, and a speech synthesis block's output to <code>audio_in</code> and <code>command_in</code> to answer the caller.</p>
     </section>
   </div>
 
   <div class="inspector-actions">
-    <span class="field-hint">Les réglages sont enregistrés à l'application et pris en compte au prochain démarrage du Run.</span>
-    <button class="ghost-btn" data-close-block-modal type="button">Annuler</button>
-    <button class="solid-btn" data-block-apply type="button" disabled>Appliquer</button>
+    <span class="field-hint">Settings are saved on Apply and taken into account the next time the Run starts.</span>
+    <button class="ghost-btn" data-close-block-modal type="button">Cancel</button>
+    <button class="solid-btn" data-block-apply type="button" disabled>Apply</button>
   </div>
 </div>
