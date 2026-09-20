@@ -51,6 +51,11 @@
         <p class="field-hint">Laissez vide pour accepter tout appel routé vers l'application Stasis.</p>
       </div>
       <div class="field-group">
+        <label for="{{ node_id }}TelephonyCallers">Numéros autorisés</label>
+        <input id="{{ node_id }}TelephonyCallers" data-block-config-field="allowed_callers" type="text" autocomplete="off" spellcheck="false" placeholder="Tous les appelants" value="{{ allowed_callers }}" />
+        <p class="field-hint">Séparez par une virgule ou un point-virgule, au format international : <code>+33612345678, +33698765432</code>. Vide accepte tout le monde ; sinon, un appel masqué ou absent de la liste est ignoré.</p>
+      </div>
+      <div class="field-group">
         <label for="{{ node_id }}TelephonyMaxCalls">Appels simultanés</label>
         <input id="{{ node_id }}TelephonyMaxCalls" data-block-config-field="max_calls" data-block-value-type="integer" type="number" min="1" max="8" step="1" value="{{ max_calls }}" />
         <p class="field-hint">De 1 à 8. Les appels au-delà de cette limite sont ignorés, pas mis en file.</p>

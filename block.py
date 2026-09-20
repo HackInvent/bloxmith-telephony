@@ -15,6 +15,7 @@
 # FB8 - Support concurrent bounded calls and cooperative listener shutdown.
 # FB9 - Survive ARI disconnections, per-call failures and missed end events.
 # FB10 - Play graph audio to the caller on the same RTP leg, newest stream first.
+# FB11 - Accept only the configured caller numbers when a list is set.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ DEFAULTS = {
     "ari_app": "bloxsmith",
     "expected_context": "",
     "expected_extension": "",
+    "allowed_callers": "",
     "auto_answer": True,
     "capture_audio": True,
     "media_host": "127.0.0.1",
@@ -63,6 +65,12 @@ DEFAULTS = {
     "max_calls": 1,
 }
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_CALLER = re.compile(r"^\+?\d{3,31}$")
+# A caller list stays a readable setting: bound what one line can hold.
+MAX_ALLOWED_CALLERS = 64
+MAX_ALLOWED_CALLERS_CHARS = 2048
+# Digits needed before a shorter national number may match a longer international one.
+CALLER_SUFFIX_DIGITS = 9
 # A gateway runs for days: losing the ARI socket is an incident to recover from,
 # not a reason to stop answering the telephone line.
 RECONNECT_MIN_DELAY = 1.0
@@ -121,6 +129,83 @@ def _optional_token(value: Any, label: str) -> str:
     return text
 
 
+def caller_number(value: Any) -> str:
+    """Return one caller number without its formatting, in international form when known.
+
+    Asterisk announces the same line as ``0033612345678`` while a user writes
+    ``+33 6 12 34 56 78``. Both collapse to the same comparable value here.
+
+    Args:
+        value: Raw caller number from a channel or from the settings.
+    """
+
+    text = str(value or "").strip()
+    digits = re.sub(r"\D", "", text)
+    if digits.startswith("00"):
+        return "+" + digits[2:]
+    return ("+" if text.startswith("+") else "") + digits
+
+
+def caller_entries(value: Any) -> list[str]:
+    """Split an allowed-caller setting written with commas, semicolons or line breaks."""
+
+    return [entry.strip() for entry in re.split(r"[;,\n]", str(value or "")) if entry.strip()]
+
+
+def _allowed_callers(value: Any) -> str:
+    """Validate the allowed-caller list and return its normalized, comma-joined form.
+
+    Args:
+        value: Raw list as typed by the user.
+
+    Raises:
+        TelephonyError: When an entry is not a phone number, or the list is oversized.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) > MAX_ALLOWED_CALLERS_CHARS:
+        raise TelephonyError("La liste des numéros autorisés est trop longue.")
+    numbers: list[str] = []
+    for entry in caller_entries(text):
+        number = caller_number(entry)
+        if not _CALLER.fullmatch(number):
+            raise TelephonyError(f"Numéro appelant invalide : {entry}")
+        if number not in numbers:
+            numbers.append(number)
+    if len(numbers) > MAX_ALLOWED_CALLERS:
+        raise TelephonyError(f"Au maximum {MAX_ALLOWED_CALLERS} numéros autorisés.")
+    return ", ".join(numbers)
+
+
+def caller_allowed(number: Any, allowed: Any) -> bool:
+    """Return whether one caller matches an allowed entry of the configured list.
+
+    A line spelled nationally and internationally differs only by its prefix, so a
+    shorter entry matches when it ends the longer one on enough digits for the
+    comparison to stay unambiguous. An unknown caller never matches a non-empty list.
+
+    Args:
+        number: Caller number announced by Asterisk.
+        allowed: Configured list, already normalized by ``config``.
+    """
+
+    candidate = caller_number(number).lstrip("+").lstrip("0")
+    if not candidate:
+        return False
+    for entry in caller_entries(allowed):
+        target = caller_number(entry).lstrip("+").lstrip("0")
+        if not target:
+            continue
+        if candidate == target:
+            return True
+        shorter, longer = sorted((candidate, target), key=len)
+        if len(shorter) >= CALLER_SUFFIX_DIGITS and longer.endswith(shorter):
+            return True
+    return False
+
+
 def config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Validate settings before any network, media or graph side effect.
 
@@ -157,6 +242,7 @@ def config(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "ari_app": app,
         "expected_context": _optional_token(source.get("expected_context"), "Le contexte"),
         "expected_extension": _optional_token(source.get("expected_extension"), "L'extension"),
+        "allowed_callers": _allowed_callers(source.get("allowed_callers")),
         "auto_answer": _boolean(source.get("auto_answer", DEFAULTS["auto_answer"]), "auto_answer"),
         "capture_audio": _boolean(source.get("capture_audio", DEFAULTS["capture_audio"]), "capture_audio"),
         "media_host": media_host,
@@ -621,6 +707,8 @@ class TelephonyBlock(BlockDefinition):
             "ari_target": escape(target, quote=True),
             "expected_context": text("expected_context"),
             "expected_extension": text("expected_extension"),
+            "allowed_callers": text("allowed_callers"),
+            "allowed_callers_count": str(len(caller_entries(values.get("allowed_callers")))),
             "media_host": text("media_host"),
             "media_port": text("media_port"),
             "ffmpeg_chunk_ms": text("ffmpeg_chunk_ms"),
@@ -1089,13 +1177,16 @@ class TelephonyBlock(BlockDefinition):
 
     @staticmethod
     def _matches(channel: Mapping[str, Any], config_value: Mapping[str, Any]) -> bool:
-        """Apply optional context/extension filters before emitting or answering."""
+        """Apply the optional context, extension and caller filters before answering."""
 
         dialplan = channel.get("dialplan") if isinstance(channel.get("dialplan"), Mapping) else {}
+        caller = channel.get("caller") if isinstance(channel.get("caller"), Mapping) else {}
         expected_context = str(config_value.get("expected_context") or "")
         expected_extension = str(config_value.get("expected_extension") or "")
+        allowed = str(config_value.get("allowed_callers") or "")
         return ((not expected_context or str(dialplan.get("context") or channel.get("context") or "") == expected_context) and
-                (not expected_extension or str(dialplan.get("exten") or channel.get("extension") or "") == expected_extension))
+                (not expected_extension or str(dialplan.get("exten") or channel.get("extension") or "") == expected_extension) and
+                (not allowed or caller_allowed(caller.get("number"), allowed)))
 
     async def _start_media(self, client: "_AriClient", config_value: Mapping[str, Any], session: _MediaSession,
                            audio: Any, playback: "_Playback | None" = None) -> None:

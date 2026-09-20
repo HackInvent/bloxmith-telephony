@@ -90,6 +90,7 @@ Connect it to a compatible audio consumer such as `Save Audio` or a supported tr
 | `ari_app` | `bloxsmith` | Asterisk Stasis application name. |
 | `expected_context` | empty | Optional inbound context filter. Empty accepts all contexts routed to the app. |
 | `expected_extension` | empty | Optional inbound extension filter. Empty accepts all extensions. |
+| `allowed_callers` | empty | Optional caller allow list. Empty accepts every caller. |
 | `auto_answer` | `true` | Answer matching incoming calls; this is independent of `capture_audio`. |
 | `capture_audio` | `true` | Attach the two-way external media leg: publish call audio and allow playback. |
 | `media_host` | `127.0.0.1` | Address advertised to Asterisk for RTP. |
@@ -116,6 +117,28 @@ barge-in needs — the caller interrupting must not wait for the previous senten
 Playback requires call media to be enabled, since it travels on the external media channel created for
 capture. It is meant for one active call: with several simultaneous calls, the same audio is sent to each of
 them, so keep `max_calls` at `1` when the blueprint answers.
+
+## Caller filter
+
+`allowed_callers` restricts which callers the block answers. Write the numbers on one line, separated
+by a comma or a semicolon; spaces and punctuation inside a number are ignored, and duplicates are
+removed when the setting is applied:
+
+```
++33612345678 ; 0033698765432, +33 6 11 22 33 44
+```
+
+Empty accepts every caller. With a list set, a call from a number that is not on it, or a withheld
+number with no caller identification at all, is ignored: no event is published and the call is never
+answered. Asterisk sees it as an unhandled Stasis call and the dialplan decides what happens next.
+
+A line written nationally and internationally is the same line, so `0612345678` and `+33612345678`
+match each other: the comparison ignores the prefix once the two forms share their last nine digits.
+Below that length a number is never matched on its ending, so a short internal extension only matches
+an exact entry. Prefer the international form, which is what Asterisk announces on a trunk.
+
+At most 64 numbers are accepted, and an entry that is not a phone number is rejected when the settings
+are applied, not at call time.
 
 ## Command output
 

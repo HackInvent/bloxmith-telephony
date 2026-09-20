@@ -55,6 +55,11 @@
       </div>
     </div>
     <div class="field-group">
+      <label for="{{ node_id }}InspCallers">Numéros autorisés</label>
+      <input id="{{ node_id }}InspCallers" data-block-config-field="allowed_callers" type="text" autocomplete="off" spellcheck="false" placeholder="Tous" value="{{ allowed_callers }}" />
+      <p class="field-hint">Virgule ou point-virgule, au format international. Vide accepte tous les appelants.</p>
+    </div>
+    <div class="field-group">
       <label for="{{ node_id }}InspMaxCalls">Appels simultanés (1 à 8)</label>
       <input id="{{ node_id }}InspMaxCalls" data-block-config-field="max_calls" data-block-value-type="integer" type="number" min="1" max="8" step="1" value="{{ max_calls }}" />
     </div>

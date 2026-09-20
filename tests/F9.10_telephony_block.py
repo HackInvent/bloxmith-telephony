@@ -1073,8 +1073,69 @@ def test_ari_client_talks_to_a_real_server():
         raise AssertionError("An unreachable ARI service must be reported as such")
 
 
+def test_caller_filter_accepts_only_the_listed_numbers():
+    """FB11: an allowed-caller list is normalized, and it gates the calls that are answered."""
+    from blocs.telephony.block import caller_allowed, caller_number
+
+    # Une même ligne s'écrit de plusieurs façons : la comparaison les ramène à une seule.
+    assert caller_number("+33 6 12.34-56 78") == "+33612345678"
+    assert caller_number("0033612345678") == "+33612345678"
+    assert caller_number("") == ""
+
+    # La liste accepte virgules, points-virgules, espaces, et retire les doublons.
+    normalized = config({**DEFAULTS, "ari_password_ref": REF,
+                         "allowed_callers": " +33 612 345 678 ; 0033698765432, +33612345678 "})
+    assert normalized["allowed_callers"] == "+33612345678, +33698765432"
+    assert config({**DEFAULTS, "ari_password_ref": REF})["allowed_callers"] == ""
+
+    too_many = ", ".join(f"+3360000{index:04d}" for index in range(65))
+    for invalid in ("+33612345678, agent", "12", too_many):
+        try:
+            config({**DEFAULTS, "ari_password_ref": REF, "allowed_callers": invalid})
+        except Exception:
+            pass
+        else:
+            raise AssertionError(f"Liste invalide acceptée : {invalid[:40]}")
+
+    allowed = normalized["allowed_callers"]
+    assert caller_allowed("0033612345678", allowed), "Le format 00 doit correspondre au format +"
+    assert caller_allowed("0612345678", allowed), "Le format national doit correspondre à l'international"
+    assert not caller_allowed("+33611111111", allowed), "Un numéro absent de la liste est refusé"
+    assert not caller_allowed("", allowed), "Un appel masqué est refusé quand une liste existe"
+    assert not caller_allowed("345678", allowed), "Un fragment trop court ne doit jamais correspondre"
+
+    block = TelephonyBlock()
+    settings = config({**DEFAULTS, "ari_password_ref": REF, "allowed_callers": "+33612345678"})
+    channel = {"id": "ch-filter", "caller": {"number": "0033612345678"}, "dialplan": {}}
+    assert block._matches(channel, settings)
+    assert not block._matches({**channel, "caller": {"number": "+33600000000"}}, settings)
+    assert not block._matches({**channel, "caller": {}}, settings)
+    # Sans liste, le filtre laisse passer tout le monde.
+    assert block._matches({**channel, "caller": {}}, config({**DEFAULTS, "ari_password_ref": REF}))
+
+
+def test_rejected_caller_never_reaches_the_graph():
+    """FB11: a filtered call emits nothing and is never answered."""
+    block = TelephonyBlock()
+    client = AsyncRequestRecorder()
+    emitted = []
+    context = SimpleNamespace(emit_result=emitted.append)
+    settings = config({**DEFAULTS, "ari_password_ref": REF, "capture_audio": False,
+                       "allowed_callers": "+33612345678"})
+    sessions = {}
+    asyncio.run(block._handle_event(context, client, settings, sessions, {
+        "type": "StasisStart",
+        "channel": {"id": "unwanted", "name": "PJSIP/ovh-9", "caller": {"number": "0033699999999"},
+                    "dialplan": {}},
+    }, None))
+    assert not sessions and not emitted, "Un appelant non autorisé ne doit rien produire"
+    assert not client.requests, "Un appelant non autorisé ne doit jamais être décroché"
+
+
 def main():
     test_contract_config_ports_ui()
+    test_caller_filter_accepts_only_the_listed_numbers()
+    test_rejected_caller_never_reaches_the_graph()
     test_ui_surfaces_expose_every_setting()
     test_centralized_simulation()
     test_event_normalization_and_listener_emission()

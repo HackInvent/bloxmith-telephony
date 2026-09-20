@@ -97,6 +97,7 @@
     "ari_app": "bloxsmith",
     "expected_context": "",
     "expected_extension": "",
+    "allowed_callers": "",
     "auto_answer": true,
     "capture_audio": true,
     "media_host": "127.0.0.1",
