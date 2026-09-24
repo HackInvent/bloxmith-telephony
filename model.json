@@ -110,12 +110,36 @@
       {
         "kind": "css",
         "path": "assets/css/block_ui.css"
+      },
+      {
+        "kind": "js",
+        "path": "assets/js/properties_mount.js"
+      },
+      {
+        "kind": "css",
+        "path": "assets/css/properties.css"
+      },
+      {
+        "kind": "js",
+        "path": "assets/js/properties.js"
       }
     ],
     "inspector_panel": [
       {
         "kind": "css",
         "path": "assets/css/block_ui.css"
+      },
+      {
+        "kind": "js",
+        "path": "assets/js/properties_mount.js"
+      },
+      {
+        "kind": "css",
+        "path": "assets/css/properties.css"
+      },
+      {
+        "kind": "js",
+        "path": "assets/js/properties.js"
       }
     ],
     "node_card": [

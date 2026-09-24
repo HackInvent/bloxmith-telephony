@@ -24,6 +24,19 @@
       ],
       "suite_count": 1,
       "report_sha256": "ec233c235ff18f881d5e325b3f6d0f97ddae45c003b2492ea082e120a65d6788"
+    },
+    {
+      "bloxsmith_version": "1.0.9",
+      "framework_commit": "ddb6d0f054d92e75b9ff1cdb9e9ee16457c5f962",
+      "framework_source_sha256": "ce69a55fa289983c81e579c5beb96ff22ae8911f8efabb602c4054e639a3061f",
+      "tested_at": "2026-09-22T00:16:57.397945+00:00",
+      "status": "passed",
+      "installation_mode": "bundled",
+      "suite_paths": [
+        "tests/F9.10_telephony_block.py"
+      ],
+      "suite_count": 1,
+      "report_sha256": "5edfda3ee15686cc4faddd951b973fa1a6ae9a0aaa375aa9d30bfdc062ad1dd7"
     }
   ]
 }

@@ -287,3 +287,12 @@ When Asterisk is behind NAT, configure the PJSIP transport with `local_net`, `ex
 ## Compatibility policy
 
 `compatibility.json` records HackInvent's verified BloxSmith versions and test evidence. Only versions listed above are verified. Other framework versions are unverified, not necessarily incompatible. The block-version badge follows `model.json`, not a published Git tag.
+
+## Properties ergonomics
+
+Modal and inspector styles are owned by this package and scoped to its exact
+release. Forms adapt to narrow panels, checkboxes stay beside their labels, and
+long values do not widen the inspector. Existing labels are associated with
+controls; keyboard navigation complements the block’s own tab handlers.
+These presentation helpers do not change port bindings, authored settings,
+runtime behavior or the block’s original surface cleanup.
